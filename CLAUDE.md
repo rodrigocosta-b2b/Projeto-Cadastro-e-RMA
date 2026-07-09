@@ -28,6 +28,55 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 ```
 Sem `assetConfig.not_found_handling: "single-page-application"` — o app não usa roteamento por URL, e o SPA-fallback sombrearia as rotas `/api/*`. Ver seção **Backend / banco de dados nativo**.
 
+> ⚠️ **Nunca faça deploy a partir de código não-mergeado.** O deploy no GoDeploy só acontece a partir da branch `main` já atualizada (após `git pull`) e com o PR da mudança **mergeado**. Ver seção **Fluxo de trabalho com Git**.
+
+## Fluxo de trabalho com Git (OBRIGATÓRIO)
+
+**Toda mudança de código passa por branch → PR → merge → deploy.** Nunca comite direto na `main`, nunca faça deploy de trabalho não-mergeado. Este fluxo é obrigatório — siga-o sem precisar perguntar.
+
+- **Repositório:** [rodrigocosta-b2b/Projeto-Cadastro-e-RMA](https://github.com/rodrigocosta-b2b/Projeto-Cadastro-e-RMA) (remote `origin`, branch padrão `main`).
+- **Git já está configurado globalmente:** `user.name`/`user.email` definidos e `credential.helper=manager` (Git Credential Manager) cuida da autenticação no push. `gh` (GitHub CLI) **não** está instalado — use `git` puro (crie/mergeie PR pela API `gh` só se estiver disponível; caso contrário, abra o PR pela URL que o `git push` retorna ou pela interface do GitHub).
+
+**Passo a passo de cada mudança:**
+
+```bash
+# 1) Partir da main atualizada
+git checkout main
+git pull origin main                    # SEMPRE dê pull antes de começar
+
+# 2) Criar a branch da mudança (prefixos: feat/, fix/, chore/, docs/)
+git checkout -b feat/descricao-curta
+
+# 3) Fazer as alterações, commitar
+git add -A
+git commit -m "mensagem descritiva em pt-BR"
+
+# 4) Publicar a branch e abrir o PR
+git push -u origin feat/descricao-curta
+#    → abra o Pull Request no GitHub (via a URL sugerida pelo push, ou `gh pr create` se houver gh)
+
+# 5) ANTES do merge: SEMPRE dar pull para integrar o que entrou na main
+git checkout main
+git pull origin main
+git checkout feat/descricao-curta
+git merge main                          # resolver conflitos aqui, se houver
+git push                                # atualiza o PR
+
+# 6) Mergear o PR na main (via GitHub / `gh pr merge`)
+
+# 7) SÓ ENTÃO fazer o deploy — a partir da main mergeada e atualizada
+git checkout main
+git pull origin main
+npm install && npm run build            # ver seção Deploy (GoDeploy)
+```
+
+**Regras invioláveis:**
+1. Nenhum commit direto na `main` — toda mudança nasce numa branch.
+2. Toda branch vira um **Pull Request** antes de entrar na `main`.
+3. **Sempre `git pull` antes do merge** (passo 5) — a `main` precisa estar integrada na branch antes de mergear.
+4. O PR precisa estar **mergeado na `main`** antes de qualquer deploy no GoDeploy.
+5. Não versionar `node_modules/`, `dist/` nem segredos (`.env*`) — ver `.gitignore`.
+
 ## Visão geral
 
 Service Desk / portal RMA da **gocase**: uma SPA React (Vite) para revendedores abrirem solicitações de **Troca/Garantia** (TG) e **Cadastro** de novos revendedores, e para a equipe interna gerenciá-las. É um app **full-stack no GoDeploy**: a SPA (front-end) conversa com um worker (`src/server.js`) que grava **todo registro no banco de dados nativo do GoDeploy** (SQLite, `env.DB`).
