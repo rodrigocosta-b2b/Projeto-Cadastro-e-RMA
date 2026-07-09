@@ -34,8 +34,10 @@ Sem `assetConfig.not_found_handling: "single-page-application"` — o app não u
 
 **Toda mudança de código passa por branch → PR → merge → deploy.** Nunca comite direto na `main`, nunca faça deploy de trabalho não-mergeado. Este fluxo é obrigatório — siga-o sem precisar perguntar.
 
+- **O Claude executa os comandos Git/`gh` diretamente** (via a ferramenta Bash/PowerShell), sem pedir ao usuário para rodá-los. Faça o ciclo completo por conta própria — criar branch, commitar, `push`, abrir o PR (`gh pr create`), dar `pull` antes do merge e mergear (`gh pr merge`) — e só pare para confirmação em ações destrutivas ou irreversíveis (ex.: `push --force`, apagar branch remota, deploy em produção). Não é preciso pedir permissão a cada `git`/`gh` de rotina.
 - **Repositório:** [rodrigocosta-b2b/Projeto-Cadastro-e-RMA](https://github.com/rodrigocosta-b2b/Projeto-Cadastro-e-RMA) (remote `origin`, branch padrão `main`).
-- **Git já está configurado globalmente:** `user.name`/`user.email` definidos e `credential.helper=manager` (Git Credential Manager) cuida da autenticação no push. `gh` (GitHub CLI) **não** está instalado — use `git` puro (crie/mergeie PR pela API `gh` só se estiver disponível; caso contrário, abra o PR pela URL que o `git push` retorna ou pela interface do GitHub).
+- **Git já está configurado globalmente:** `user.name`/`user.email` definidos e `credential.helper=manager` (Git Credential Manager) cuida da autenticação no push.
+- **`gh` (GitHub CLI) instalado e autenticado globalmente.** Use-o para criar e mergear PRs por linha de comando: `gh pr create --fill --base main`, `gh pr merge --squash --delete-branch`, `gh pr status`. O `gh` também serve de credential helper do Git para HTTPS.
 
 **Passo a passo de cada mudança:**
 
@@ -53,7 +55,7 @@ git commit -m "mensagem descritiva em pt-BR"
 
 # 4) Publicar a branch e abrir o PR
 git push -u origin feat/descricao-curta
-#    → abra o Pull Request no GitHub (via a URL sugerida pelo push, ou `gh pr create` se houver gh)
+gh pr create --fill --base main         # abre o Pull Request pela CLI
 
 # 5) ANTES do merge: SEMPRE dar pull para integrar o que entrou na main
 git checkout main
@@ -62,7 +64,8 @@ git checkout feat/descricao-curta
 git merge main                          # resolver conflitos aqui, se houver
 git push                                # atualiza o PR
 
-# 6) Mergear o PR na main (via GitHub / `gh pr merge`)
+# 6) Mergear o PR na main
+gh pr merge --squash --delete-branch    # merge + remove a branch já integrada
 
 # 7) SÓ ENTÃO fazer o deploy — a partir da main mergeada e atualizada
 git checkout main
