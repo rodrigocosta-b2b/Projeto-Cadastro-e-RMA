@@ -1,0 +1,28 @@
+# Dependências
+node_modules/
+
+# Build de produção (gerado por `npm run build`)
+dist/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# Variáveis de ambiente / segredos
+.env
+.env.*
+!.env.example
+
+# Arquivos de sistema
+.DS_Store
+Thumbs.db
+
+# Config local do Claude Code
+.claude/settings.local.json
+
+# Editores
+.vscode/
+.idea/
+*.swp
