@@ -2801,12 +2801,18 @@ function AcervoDocs({ acervo, onAdd, onRemove, toast }) {
 }
 
 /* ===================== Root ===================== */
+// Sessão do usuário logado, persistida para sobreviver a F5 / reabertura da aba.
+const SESSION_KEY = "gocase_session_v1";
+const _restoreSession = () => {
+  try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } catch (e) { return null; }
+};
+
 export default function App() {
   const [users, setUsers] = useState(SEED_USERS);
-  const [currentUser, setCurrentUser] = useState(null);
+  const [currentUser, setCurrentUser] = useState(() => _restoreSession());
   const [authView, setAuthView] = useState("login"); // login | signup
-  const [portal, setPortal] = useState("externo");
-  const [view, setView] = useState("inicio");
+  const [portal, setPortal] = useState(() => { const u = _restoreSession(); return u && isInterno(u.role) ? "interno" : "externo"; });
+  const [view, setView] = useState(() => { const u = _restoreSession(); return u && isInterno(u.role) ? "dash" : "inicio"; });
   const [selId, setSelId] = useState(null);
   const [modal, setModal] = useState(null);
   const [notifOpen, setNotifOpen] = useState(false);
@@ -2866,6 +2872,23 @@ export default function App() {
       }
 
       setDataLoaded(true);
+
+      // Valida a sessão restaurada do localStorage contra a base atual de
+      // usuários: se a conta foi desativada ou removida, desloga; se os
+      // dados mudaram (ex: troca de role), atualiza a sessão.
+      setCurrentUser(cu => {
+        if (!cu) return cu;
+        const fresh = us.find(x => x.email === cu.email);
+        if (!fresh || (fresh.status && fresh.status !== "Ativo")) {
+          try { localStorage.removeItem(SESSION_KEY); } catch (e) { }
+          return null;
+        }
+        if (JSON.stringify(fresh) !== JSON.stringify(cu)) {
+          try { localStorage.setItem(SESSION_KEY, JSON.stringify(fresh)); } catch (e) { }
+          return fresh;
+        }
+        return cu;
+      });
     })();
     return () => { alive = false; };
   }, []);
@@ -2887,6 +2910,7 @@ export default function App() {
 
   const onLogin = (u) => {
     setCurrentUser(u);
+    try { localStorage.setItem(SESSION_KEY, JSON.stringify(u)); } catch (e) { }
     const p = isInterno(u.role) ? "interno" : "externo";
     setPortal(p); setView(p === "externo" ? "inicio" : "dash");
   };
@@ -2898,7 +2922,7 @@ export default function App() {
     toast("Conta criada! Bem-vindo(a) ao portal do revendedor.");
     return res;
   };
-  const logout = () => { setCurrentUser(null); setAuthView("login"); setView("inicio"); };
+  const logout = () => { setCurrentUser(null); setAuthView("login"); setView("inicio"); try { localStorage.removeItem(SESSION_KEY); } catch (e) { } };
   // Troca de portal só liberada para a equipe interna (admin/gestor/colaborador)
   const switchPortal = (p) => {
     if (p === "interno" && !isInterno(currentUser?.role)) { toast("Acesso ao portal interno restrito à equipe gocase."); return; }
