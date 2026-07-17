@@ -235,6 +235,7 @@ const DB_KEY = "gocase_users_v1";
 const SEED_USERS = [
   { email: "beatriz.nogueira@gocase.com", password: "123456QAZ", name: "Beatriz Nogueira", role: "ADMIN", status: "Ativo" },
   { email: "rodrigo.costa@gocase.com", password: "123456QAZ", name: "Rodrigo Costa", role: "ADMIN", status: "Ativo" },
+  { email: "larissa.simoes@gocase.com", password: "123456QAZ", name: "Larissa Simões", role: "ADMIN", status: "Ativo" },
   { email: "contato@mundoacessorios.com.br", password: "123456QAZ", name: "Mundo dos Acessórios", role: "CLIENTE", status: "Ativo", cnpj: "12.345.678/0001-90", telefone: "(11) 4002-8922" },
 ];
 const isInterno = (role) => ["ADMIN", "GESTOR", "COLABORADOR"].includes(role);
