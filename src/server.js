@@ -17,6 +17,7 @@
  *   GET    /api/users                           → [user sem senha]
  *   POST   /api/users        {user}             → upsert de conta (semear/criar)
  *   PATCH  /api/users/:email {changes}          → atualiza conta
+ *   DELETE /api/users/:email                    → remove conta
  *   PUT    /api/requests/:id {request}          → upsert de solicitação
  *   POST   /api/notifications {notif}           → cria notificação
  *   POST   /api/notifications/read {ids:[]}      → marca como lidas
@@ -259,6 +260,11 @@ export default {
         if (!existing) return json({ error: "not_found" }, 404);
         const changes = (await request.json().catch(() => ({}))) || {};
         return json({ user: await upsertUser(env, { ...existing, ...changes, email }) });
+      }
+      if (path.startsWith("/api/users/") && method === "DELETE") {
+        const email = decodeURIComponent(path.slice("/api/users/".length));
+        await env.DB.exec("DELETE FROM users WHERE email = ?", [lower(email)]);
+        return json({ ok: true });
       }
 
       if (path.startsWith("/api/requests/") && method === "PUT") {
