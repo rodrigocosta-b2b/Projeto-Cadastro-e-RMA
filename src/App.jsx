@@ -381,6 +381,13 @@ const db = {
     const arr = (_ls.get(DB_KEY, []) || []).map(x => x.email === email ? { ...x, ...changes } : x);
     _ls.set(DB_KEY, arr);
   },
+  async removeUser(email) {
+    if ((await dbMode()) === "remote") {
+      try { await apiJSON("DELETE", `/api/users/${encodeURIComponent(email)}`); } catch (e) { }
+      return;
+    }
+    _ls.set(DB_KEY, (_ls.get(DB_KEY, []) || []).filter(x => x.email !== email));
+  },
   async saveRequest(req) {
     if ((await dbMode()) === "remote") {
       try { await apiJSON("PUT", `/api/requests/${encodeURIComponent(req.id)}`, req); } catch (e) { }
@@ -2096,8 +2103,10 @@ function ClienteDetalhe({ nome, requests, users, nav, historico }) {
 const ROLE_LABEL = { ADMIN: "Administrador", GESTOR: "Gestor", COLABORADOR: "Colaborador", CLIENTE: "Cliente" };
 const ROLE_COLOR = { ADMIN: "#F8475E", GESTOR: "#6C5CE7", COLABORADOR: "#00B8D9", CLIENTE: "#1FBF75" };
 
-function Usuarios({ toast, users, currentUser, onAddUser, onUpdateUser }) {
+function Usuarios({ toast, users, currentUser, onAddUser, onUpdateUser, onDeleteUser }) {
   const isAdmin = currentUser?.role === "ADMIN";
+  const isGestor = currentUser?.role === "GESTOR";
+  const canManage = isAdmin || isGestor; // usado só pra decidir se a coluna Ações aparece
   const [query, setQuery] = useState("");
   const [roleFilter, setRoleFilter] = useState("Todos");
   const [showForm, setShowForm] = useState(false);
@@ -2169,7 +2178,7 @@ function Usuarios({ toast, users, currentUser, onAddUser, onUpdateUser }) {
       <Card>
         <table className="w-full text-sm">
           <thead><tr className="text-left" style={{ color: C.muted }}>
-            {["Nome", "E-mail", "CNPJ", "Perfil", "Status", isAdmin ? "Ações" : ""].map(h =>
+            {["Nome", "E-mail", "CNPJ", "Perfil", "Status", canManage ? "Ações" : ""].map(h =>
               <th key={h} className="px-4 py-3 text-xs font-semibold border-b" style={{ borderColor: C.line }}>{h}</th>)}
           </tr></thead>
           <tbody>
@@ -2179,7 +2188,7 @@ function Usuarios({ toast, users, currentUser, onAddUser, onUpdateUser }) {
                 <td className="px-4 py-3" style={{ color: C.muted }}>{u.email}</td>
                 <td className="px-4 py-3" style={{ color: C.muted }}>{u.cnpj || "—"}</td>
                 <td className="px-4 py-3">
-                  {isAdmin ? (
+                  {isGestor ? (
                     <select value={u.role} onChange={e => { onUpdateUser(u.email, { role: e.target.value }); toast(`Perfil de ${u.name} alterado para ${ROLE_LABEL[e.target.value]}.`); }}
                       className="rounded-lg border px-2 py-1 text-xs font-semibold bg-white" style={{ borderColor: C.line, color: ROLE_COLOR[u.role] }}>
                       {["ADMIN", "GESTOR", "COLABORADOR", "CLIENTE"].map(r => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}
@@ -2188,12 +2197,24 @@ function Usuarios({ toast, users, currentUser, onAddUser, onUpdateUser }) {
                 </td>
                 <td className="px-4 py-3"><Pill label={u.status} color={u.status === "Ativo" ? C.green : "#8A8A99"} /></td>
                 <td className="px-4 py-3">
-                  {isAdmin && (
-                    <button onClick={() => { const ns = u.status === "Ativo" ? "Inativo" : "Ativo"; onUpdateUser(u.email, { status: ns }); toast(`${u.name} agora está ${ns}.`); }}
-                      className="text-xs font-semibold" style={{ color: u.status === "Ativo" ? C.coral : C.green }}>
-                      {u.status === "Ativo" ? "Inativar" : "Ativar"}
-                    </button>
-                  )}
+                  <div className="flex items-center gap-3">
+                    {isAdmin && (
+                      <button onClick={() => { const ns = u.status === "Ativo" ? "Inativo" : "Ativo"; onUpdateUser(u.email, { status: ns }); toast(`${u.name} agora está ${ns}.`); }}
+                        className="text-xs font-semibold" style={{ color: u.status === "Ativo" ? C.coral : C.green }}>
+                        {u.status === "Ativo" ? "Inativar" : "Ativar"}
+                      </button>
+                    )}
+                    {isGestor && (
+                      <button onClick={() => {
+                        if (u.email === currentUser?.email) { toast("Você não pode excluir a própria conta."); return; }
+                        if (!window.confirm(`Excluir a conta de ${u.name} (${u.email})? Esta ação não pode ser desfeita.`)) return;
+                        onDeleteUser(u.email);
+                        toast(`Conta de ${u.name} excluída.`);
+                      }} className="text-xs font-semibold" style={{ color: C.coral }}>
+                        Excluir
+                      </button>
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}
@@ -2203,7 +2224,7 @@ function Usuarios({ toast, users, currentUser, onAddUser, onUpdateUser }) {
           </tbody>
         </table>
       </Card>
-      {!isAdmin && <p className="text-xs mt-3" style={{ color: C.muted }}>Apenas administradores podem criar contas e alterar permissões.</p>}
+      {!isAdmin && !isGestor && <p className="text-xs mt-3" style={{ color: C.muted }}>Apenas administradores podem criar contas; apenas gestores podem alterar perfis ou excluir contas.</p>}
     </div>
   );
 }
@@ -2904,6 +2925,7 @@ export default function App() {
     setUsers(list => list.map(x => x.email === email ? { ...x, ...stripPw(changes) } : x));
     db.updateUser(email, changes);
   };
+  const removeUser = (email) => { setUsers(list => list.filter(x => x.email !== email)); db.removeUser(email); };
 
   const toast = (m) => { setToastMsg(m); setTimeout(() => setToastMsg(null), 2600); };
   const nav = (v, id = null) => { setView(v); if (id) setSelId(id); setNotifOpen(false); };
@@ -3070,7 +3092,7 @@ export default function App() {
   else if (portal === "externo") {
     screen = { inicio: <ExtInicio nav={nav} requests={requests} user={currentUser} />, "nova-tg": <ExtNovaTG nav={nav} toast={toast} onCreate={createRequest} user={currentUser} />, "nova-cad": <ExtNovaCad nav={nav} toast={toast} onCreate={createRequest} acervo={acervo} />, minhas: <ExtMinhas nav={nav} requests={requests} user={currentUser} />, manual: <Manual />, perfil: <Perfil toast={toast} user={currentUser} /> }[view];
   } else {
-    screen = { dash: <IntDash nav={nav} requests={requests} />, "lista-tg": <IntLista nav={nav} requests={requests} tipo="Troca/Garantia" titulo="Trocas e Garantias" />, "lista-cad": <IntLista nav={nav} requests={requests} tipo="Cadastro" titulo="Solicitações de Cadastro" />, clientes: <Clientes requests={requests} users={users} nav={nav} />, acervo: (["ADMIN", "GESTOR"].includes(currentUser?.role) ? <AcervoDocs acervo={acervo} onAdd={addAcervoDoc} onRemove={removeAcervoDoc} toast={toast} /> : <IntDash nav={nav} requests={requests} />), historico: <Historico nav={nav} />, usuarios: <Usuarios toast={toast} users={users} currentUser={currentUser} onAddUser={addUser} onUpdateUser={updateUser} />, relatorios: <Relatorios toast={toast} requests={requests} />, config: <Config toast={toast} templates={templates} onSaveTemplates={saveTemplates} /> }[view];
+    screen = { dash: <IntDash nav={nav} requests={requests} />, "lista-tg": <IntLista nav={nav} requests={requests} tipo="Troca/Garantia" titulo="Trocas e Garantias" />, "lista-cad": <IntLista nav={nav} requests={requests} tipo="Cadastro" titulo="Solicitações de Cadastro" />, clientes: <Clientes requests={requests} users={users} nav={nav} />, acervo: (["ADMIN", "GESTOR"].includes(currentUser?.role) ? <AcervoDocs acervo={acervo} onAdd={addAcervoDoc} onRemove={removeAcervoDoc} toast={toast} /> : <IntDash nav={nav} requests={requests} />), historico: <Historico nav={nav} />, usuarios: <Usuarios toast={toast} users={users} currentUser={currentUser} onAddUser={addUser} onUpdateUser={updateUser} onDeleteUser={removeUser} />, relatorios: <Relatorios toast={toast} requests={requests} />, config: <Config toast={toast} templates={templates} onSaveTemplates={saveTemplates} /> }[view];
   }
 
   const visibleNotifs = notifications.filter(n =>
