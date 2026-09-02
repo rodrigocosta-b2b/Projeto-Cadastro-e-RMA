@@ -87,6 +87,67 @@ const parse = (s, def = null) => {
   }
 };
 
+/* ----------------------------------- senha ---------------------------------- *
+ * Hash de senha via PBKDF2-SHA256 (Web Crypto — crypto.subtle), disponível
+ * nativamente no runtime do worker, sem depender de pacote externo. Formato
+ * armazenado: pbkdf2$<iterações>$<salt em base64>$<hash em base64>.
+ *
+ * Compatibilidade com contas antigas: enquanto a coluna `password` ainda guardar
+ * texto puro (contas criadas antes desta mudança), o login aceita a senha em
+ * texto puro e, no primeiro login bem-sucedido, migra silenciosamente a senha
+ * armazenada para o formato com hash. */
+const PBKDF2_ITERATIONS = 100000;
+
+function bufToB64(buf) {
+  let bin = "";
+  const bytes = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+function b64ToBuf(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+async function deriveBits(password, salt, iterations) {
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"],
+  );
+  return crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations, hash: "SHA-256" }, key, 256,
+  );
+}
+async function hashPassword(password) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const bits = await deriveBits(password, salt, PBKDF2_ITERATIONS);
+  return `pbkdf2$${PBKDF2_ITERATIONS}$${bufToB64(salt)}$${bufToB64(bits)}`;
+}
+function timingSafeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+function isHashed(stored) {
+  return typeof stored === "string" && stored.startsWith("pbkdf2$");
+}
+async function verifyPassword(password, stored) {
+  if (!stored) return false;
+  if (isHashed(stored)) {
+    const [, iterStr, saltB64, hashB64] = stored.split("$");
+    const iterations = parseInt(iterStr, 10) || PBKDF2_ITERATIONS;
+    const bits = await deriveBits(password, b64ToBuf(saltB64), iterations);
+    return timingSafeEqual(new Uint8Array(bits), b64ToBuf(hashB64));
+  }
+  // Conta legada, senha ainda em texto puro no banco.
+  return stored === password;
+}
+async function hashIfNeeded(password) {
+  if (!password || isHashed(password)) return password || "";
+  return hashPassword(password);
+}
+
 async function getUser(env, email) {
   const r = await env.DB.query("SELECT * FROM users WHERE email = ?", [lower(email)]);
   return r.rows && r.rows[0] ? r.rows[0] : null;
@@ -95,6 +156,7 @@ async function getUser(env, email) {
 async function upsertUser(env, u) {
   const email = lower(u.email);
   if (!email) throw new Error("email required");
+  const password = await hashIfNeeded(u.password);
   await env.DB.exec(
     `INSERT INTO users (email, password, name, role, status, cnpj, telefone, contato)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -104,7 +166,7 @@ async function upsertUser(env, u) {
        contato = excluded.contato`,
     [
       email,
-      u.password || "",
+      password,
       u.name || "",
       u.role || "CLIENTE",
       u.status || "Ativo",
@@ -232,8 +294,12 @@ export default {
       if (path === "/api/login" && method === "POST") {
         const { email, password } = (await request.json().catch(() => ({}))) || {};
         const u = await getUser(env, email);
-        if (!u || u.password !== password) return json({ error: "invalid" }, 401);
+        if (!u || !(await verifyPassword(password, u.password))) return json({ error: "invalid" }, 401);
         if (u.status && u.status !== "Ativo") return json({ error: "inactive" }, 403);
+        // Conta antiga com senha em texto puro: migra para hash agora que a senha foi confirmada.
+        if (!isHashed(u.password)) {
+          await env.DB.exec("UPDATE users SET password = ? WHERE email = ?", [await hashPassword(password), u.email]);
+        }
         return json({ user: stripPw(u) });
       }
 
