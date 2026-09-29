@@ -30,6 +30,16 @@ Sem `assetConfig.not_found_handling: "single-page-application"` — o app não u
 
 > ⚠️ **Nunca faça deploy a partir de código não-mergeado.** O deploy no GoDeploy só acontece a partir da branch `main` já atualizada (após `git pull`) e com o PR da mudança **mergeado**. Ver seção **Fluxo de trabalho com Git**.
 
+## Plataforma de Cadastro de Fornecedores (`fornecedores/`)
+
+Os processos de **cadastro/homologação de fornecedor** foram separados do Service Desk numa plataforma própria, com o mesmo layout e estilo: pasta `fornecedores/` (`index.html`, `src/App.jsx`, `src/main.jsx`, `src/server.js`, `vite.config.js`), publicada no GoDeploy como o app de slug **`gocase-cadastro-fornecedores`** (https://gocase-cadastro-fornecedores.devgogroup.com/), com **banco próprio** (outro `env.DB`, contas e solicitações independentes do Service Desk).
+
+- `fornecedores/src/App.jsx` nasceu de `src/App (1).jsx` sem RMA: sem Nova Troca/Garantia, Trocas e Garantias, Histórico (pós-venda), Manuais e Normas, pré-análise por IA nem relatórios de RMA. Portal do fornecedor: Início, Solicitação de Cadastro, Minhas Solicitações, Perfil. Portal interno: Dashboard, Cadastros, Fornecedores, Acervo de documentos, Usuários, Relatórios, Configurações.
+- `fornecedores/src/server.js` é a mesma API do worker do Service Desk (cópia de `src/server.js`).
+- Build e dev usam as dependências da raiz: `npm run build:fornecedores` (gera `fornecedores/dist/`) e `npm run dev:fornecedores`.
+- Deploy: mesmo fluxo do Service Desk, subindo `fornecedores/dist/index.html` como `index.html`, `fornecedores/dist/assets/*` como `assets/*` e `fornecedores/src/server.js` como `src/server.js` (entrypoint), no app `gocase-cadastro-fornecedores`.
+- O Service Desk (`4ff9134d`) **ainda não foi alterado**: a versão no ar (v39) tem funções cujo código-fonte não está neste repositório (manuais editáveis, recuperação de senha, busca de CNPJ no Datamart, zona de risco). Remover o Cadastro de lá depende de recuperar esse código.
+
 ## Fluxo de trabalho com Git (OBRIGATÓRIO)
 
 **Toda mudança de código passa por branch → PR → merge → deploy.** Nunca comite direto na `main`, nunca faça deploy de trabalho não-mergeado. Este fluxo é obrigatório — siga-o sem precisar perguntar.
