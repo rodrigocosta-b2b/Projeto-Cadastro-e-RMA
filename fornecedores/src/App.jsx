@@ -132,23 +132,24 @@ const Field = ({ label, value, onChange, type = "text", full, options }) => (
 /* Upload real de arquivos — converte para base64 (data: URL) para persistência
    entre sessões. blob: URLs somem ao fechar a página; data: URLs sobrevivem
    no storage (localStorage / window.storage). Limite recomendado: ~3 MB por arquivo. */
-function FileUpload({ accept = "image/jpeg,image/png,image/webp,video/mp4,video/quicktime,application/pdf", hint = "Clique ou arraste para adicionar — imagens (JPG, PNG, WEBP), vídeos (MP4, MOV) e PDF", initial = [], onFiles }) {
+function FileUpload({ accept = "image/jpeg,image/png,image/webp,video/mp4,video/quicktime,application/pdf", hint = "Clique ou arraste para adicionar — imagens (JPG, PNG, WEBP), vídeos (MP4, MOV) e PDF", initial = [], onFiles, upload = (file) => db.uploadFile(file) }) {
   const [files, setFiles] = useState(initial);
   const [drag, setDrag] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
   const inputRef = useRef(null);
 
   const update = (next) => { setFiles(next); if (onFiles) onFiles(next); };
   const remove = (i) => update(files.filter((_, idx) => idx !== i));
 
   const add = async (list) => {
-    setLoading(true);
+    setLoading(true); setErr("");
     try {
       // Cada arquivo vai para o banco nativo (env.DB) e volta com URL própria.
-      const arr = await Promise.all(Array.from(list).map((file) => db.uploadFile(file)));
+      const arr = await Promise.all(Array.from(list).map((file) => upload(file)));
       update([...files, ...arr]);
     } catch (e) {
-      console.error("FileUpload error:", e);
+      setErr(e && e.message ? e.message : "Não foi possível enviar o arquivo.");
     } finally {
       setLoading(false);
     }
@@ -174,6 +175,7 @@ function FileUpload({ accept = "image/jpeg,image/png,image/webp,video/mp4,video/
               {hint}</>
         }
       </div>
+      {err && <div className="text-xs mt-2 font-semibold" style={{ color: C.danger }}>{err}</div>}
       {files.length > 0 && (
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-3">
           {files.map((f, i) => {
@@ -182,8 +184,8 @@ function FileUpload({ accept = "image/jpeg,image/png,image/webp,video/mp4,video/
               <div key={i} className="relative rounded-xl border overflow-hidden" style={{ borderColor: C.line }}>
                 <button onClick={() => remove(i)} className="absolute top-1 right-1 z-10 w-6 h-6 rounded-full flex items-center justify-center text-white" style={{ background: "rgba(30,30,42,.7)" }}><X size={13} /></button>
                 <div className="h-24 flex items-center justify-center bg-gray-50">
-                  {isImg ? <img src={f.url} alt={f.name} className="h-full w-full object-cover" />
-                    : isVid ? <video src={f.url} className="h-full w-full object-cover" muted />
+                  {isImg ? <img src={f.preview || f.url} alt={f.name} className="h-full w-full object-cover" />
+                    : isVid ? <video src={f.preview || f.url} className="h-full w-full object-cover" muted />
                       : <div style={{ color: C.coral }} className="flex flex-col items-center">{isPdf ? <FileIcon size={26} /> : <Paperclip size={26} />}</div>}
                 </div>
                 <div className="p-2">
@@ -200,14 +202,16 @@ function FileUpload({ accept = "image/jpeg,image/png,image/webp,video/mp4,video/
 }
 
 /* ===================== Contas & persistência ===================== */
-// ATENÇÃO: autenticação apenas no front-end, para demonstração/testes.
-// Não é segurança real — senhas ficam visíveis no cliente. A segurança de
-// verdade (hash de senha, validação no servidor, JWT) vem com o backend.
+// Contas da equipe interna. No site publicado, login e senha são validados no
+// servidor (src/server.js) e as senhas nunca chegam ao navegador. As contas abaixo
+// só existem no modo local (npm run dev / preview sem worker) — o servidor recusa
+// esta senha de desenvolvimento.
 const DB_KEY = "gocase_forn_users_v1";
+const SESSION_KEY = "gocase_forn_session_v1"; // sessão do modo local
 const SEED_USERS = [
-  { email: "beatriz.nogueira@gocase.com", password: "123456QAZ", name: "Beatriz Nogueira", role: "ADMIN", status: "Ativo" },
-  { email: "rodrigo.costa@gocase.com", password: "123456QAZ", name: "Rodrigo Costa", role: "ADMIN", status: "Ativo" },
-  { email: "larissa.simoes@gocase.com", password: "123456QAZ", name: "Larissa Simões", role: "ADMIN", status: "Ativo" },
+  { email: "beatriz.nogueira@gocase.com", password: "dev-local-only", name: "Beatriz Nogueira", role: "ADMIN", status: "Ativo" },
+  { email: "rodrigo.costa@gocase.com", password: "dev-local-only", name: "Rodrigo Costa", role: "ADMIN", status: "Ativo" },
+  { email: "larissa.simoes@gocase.com", password: "dev-local-only", name: "Larissa Simões", role: "ADMIN", status: "Ativo" },
 ];
 const isInterno = (role) => ["ADMIN", "GESTOR", "COLABORADOR"].includes(role);
 
@@ -254,8 +258,11 @@ function renderTemplate(tpl, { id, cliente, status }) {
 /* ===================== Banco de dados nativo (GoDeploy) =====================
    Todo registro do sistema é gravado no banco SQLite do GoDeploy (env.DB),
    através do worker src/server.js. Cada entidade (conta, solicitação,
-   notificação, documento do acervo) é persistida individualmente — nada se
-   perde ao recarregar a página ou trocar de aba.
+   notificação, documento do acervo) é persistida individualmente.
+
+   Acesso: rotas /api/public/* são abertas (formulário de cadastro e consulta de
+   status); o resto exige a sessão da equipe (cookie HttpOnly emitido no login —
+   o token também vai no header Authorization como reserva).
 
    Em desenvolvimento (npm run dev) ou no preview, quando o worker não existe,
    a camada cai automaticamente para o localStorage do navegador. O modo é
@@ -270,15 +277,29 @@ async function dbMode() {
   } catch (e) { _dbMode = "local"; }
   return _dbMode;
 }
+const TOKEN_KEY = "gocase_forn_token_v1";
+let _token = (() => { try { return sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; } })();
+function setToken(t) {
+  _token = t || "";
+  try { if (_token) sessionStorage.setItem(TOKEN_KEY, _token); else sessionStorage.removeItem(TOKEN_KEY); } catch (e) { }
+}
 async function apiJSON(method, path, body) {
   const r = await fetch(path, {
     method,
-    headers: { "content-type": "application/json", Accept: "application/json" },
+    credentials: "same-origin",
+    headers: { "content-type": "application/json", Accept: "application/json", ...(_token ? { Authorization: `Bearer ${_token}` } : {}) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
   return r;
 }
 const stripPw = (u) => { if (!u) return u; const { password, ...rest } = u; return rest; };
+const readAsDataURL = (file) => new Promise((res, rej) => {
+  const r = new FileReader();
+  r.onload = () => res(r.result);
+  r.onerror = () => rej(new Error("Falha ao ler arquivo"));
+  r.readAsDataURL(file);
+});
+const PUBLIC_FILE_MAX = 10 * 1024 * 1024; // igual ao limite do worker
 
 // ---- fallback local (dev/preview) ----
 const _ls = {
@@ -291,17 +312,33 @@ const _ls = {
     _ls.set(k, arr); return arr;
   },
 };
+const _lsUsers = () => {
+  const arr = _ls.get(DB_KEY, null);
+  if (Array.isArray(arr) && arr.length) return arr;
+  _ls.set(DB_KEY, SEED_USERS); return SEED_USERS;
+};
+const fmtDataBR = (d) => `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
 
 const db = {
+  // Sessão atual da equipe (null = visitante do formulário público).
+  async me() {
+    if ((await dbMode()) === "remote") {
+      try { const r = await apiJSON("GET", "/api/me"); if (r.ok) return (await r.json()).user; } catch (e) { }
+      setToken("");
+      return null;
+    }
+    try { return JSON.parse(localStorage.getItem(SESSION_KEY)) || null; } catch (e) { return null; }
+  },
   async bootstrap() {
     if ((await dbMode()) === "remote") {
       try {
-        const r = await fetch("/api/bootstrap", { headers: { Accept: "application/json" } });
+        const r = await apiJSON("GET", "/api/bootstrap");
         if (r.ok) return await r.json();
       } catch (e) { }
+      return null;
     }
     return {
-      users: (_ls.get(DB_KEY, null) || []).map(stripPw) || null,
+      users: _lsUsers().map(stripPw),
       requests: _ls.get(REQ_KEY, null),
       notifications: _ls.get(NOTIF_KEY, null),
       templates: _ls.get(TPL_KEY, null),
@@ -312,44 +349,58 @@ const db = {
     if ((await dbMode()) === "remote") {
       try {
         const r = await apiJSON("POST", "/api/login", { email, password });
-        if (r.status === 200) return { ok: true, user: (await r.json()).user };
+        if (r.status === 200) { const j = await r.json(); setToken(j.token); return { ok: true, user: j.user }; }
         if (r.status === 403) return { ok: false, reason: "inactive" };
+        if (r.status === 429) return { ok: false, reason: "throttled" };
         return { ok: false, reason: "invalid" };
       } catch (e) { return { ok: false, reason: "error" }; }
     }
-    const u = (_ls.get(DB_KEY, []) || []).find(x => (x.email || "").toLowerCase() === (email || "").trim().toLowerCase());
-    if (!u || u.password !== password) return { ok: false, reason: "invalid" };
+    const u = _lsUsers().find(x => (x.email || "").toLowerCase() === (email || "").trim().toLowerCase());
+    if (!u || u.password !== password || !isInterno(u.role)) return { ok: false, reason: "invalid" };
     if (u.status && u.status !== "Ativo") return { ok: false, reason: "inactive" };
+    try { localStorage.setItem(SESSION_KEY, JSON.stringify(stripPw(u))); } catch (e) { }
     return { ok: true, user: stripPw(u) };
   },
-  async signup(user) {
+  async logout() {
+    if ((await dbMode()) === "remote") {
+      try { await apiJSON("POST", "/api/logout"); } catch (e) { }
+    }
+    setToken("");
+    try { localStorage.removeItem(SESSION_KEY); } catch (e) { }
+  },
+  async changePassword(email, current, next) {
     if ((await dbMode()) === "remote") {
       try {
-        const r = await apiJSON("POST", "/api/signup", user);
-        if (r.status === 201) return { ok: true, user: (await r.json()).user };
-        if (r.status === 409) return { ok: false, reason: "exists" };
-        return { ok: false, reason: "error" };
+        const r = await apiJSON("POST", "/api/me/password", { current, next });
+        if (r.ok) return { ok: true };
+        const j = await r.json().catch(() => ({}));
+        return { ok: false, reason: j.error || "error" };
       } catch (e) { return { ok: false, reason: "error" }; }
     }
-    const arr = _ls.get(DB_KEY, []) || [];
-    if (arr.some(x => (x.email || "").toLowerCase() === (user.email || "").trim().toLowerCase())) return { ok: false, reason: "exists" };
-    arr.push(user); _ls.set(DB_KEY, arr);
-    return { ok: true, user: stripPw(user) };
+    const arr = _lsUsers();
+    const u = arr.find(x => x.email === email);
+    if (!u || u.password !== current) return { ok: false, reason: "invalid_current" };
+    _ls.set(DB_KEY, arr.map(x => x.email === email ? { ...x, password: next } : x));
+    return { ok: true };
   },
   async saveUser(user) {
     if ((await dbMode()) === "remote") {
-      try { const r = await apiJSON("POST", "/api/users", user); if (r.ok) return stripPw((await r.json()).user); } catch (e) { }
-      return stripPw(user);
+      try {
+        const r = await apiJSON("POST", "/api/users", user);
+        if (r.ok) return { ok: true, user: stripPw((await r.json()).user) };
+        const j = await r.json().catch(() => ({}));
+        return { ok: false, reason: j.error || "error" };
+      } catch (e) { return { ok: false, reason: "error" }; }
     }
     _ls.upsert(DB_KEY, user, "email");
-    return stripPw(user);
+    return { ok: true, user: stripPw(user) };
   },
   async updateUser(email, changes) {
     if ((await dbMode()) === "remote") {
       try { await apiJSON("PATCH", `/api/users/${encodeURIComponent(email)}`, changes); } catch (e) { }
       return;
     }
-    const arr = (_ls.get(DB_KEY, []) || []).map(x => x.email === email ? { ...x, ...changes } : x);
+    const arr = _lsUsers().map(x => x.email === email ? { ...x, ...changes } : x);
     _ls.set(DB_KEY, arr);
   },
   async removeUser(email) {
@@ -357,7 +408,7 @@ const db = {
       try { await apiJSON("DELETE", `/api/users/${encodeURIComponent(email)}`); } catch (e) { }
       return;
     }
-    _ls.set(DB_KEY, (_ls.get(DB_KEY, []) || []).filter(x => x.email !== email));
+    _ls.set(DB_KEY, _lsUsers().filter(x => x.email !== email));
   },
   async saveRequest(req) {
     if ((await dbMode()) === "remote") {
@@ -403,16 +454,11 @@ const db = {
     }
     _ls.set(ACERVO_KEY, (_ls.get(ACERVO_KEY, []) || []).filter(d => d.id !== id));
   },
-  // Upload de arquivo → banco nativo. Retorna { id?, name, type, size, url }.
+  // Upload de arquivo pela equipe → banco nativo. Retorna { id?, name, type, size, url }.
   // No modo remoto a URL é /api/files/:id (same-origin, abre inline). Sem worker,
   // guarda o data: URL inline como fallback.
   async uploadFile(file) {
-    const dataUrl = await new Promise((res, rej) => {
-      const r = new FileReader();
-      r.onload = () => res(r.result);
-      r.onerror = () => rej(new Error("Falha ao ler arquivo"));
-      r.readAsDataURL(file);
-    });
+    const dataUrl = await readAsDataURL(file);
     if ((await dbMode()) === "remote") {
       try {
         const comma = dataUrl.indexOf(",");
@@ -422,6 +468,88 @@ const db = {
       } catch (e) { }
     }
     return { name: file.name, type: file.type || "", size: file.size, url: dataUrl };
+  },
+
+  /* ---- rotas públicas (formulário de cadastro, sem login) ---- */
+  // Anexo enviado pelo fornecedor. Lança erro com mensagem amigável se não der certo.
+  // `preview` é uma URL local só para a miniatura (o visitante não lê /api/files).
+  async uploadPublicFile(file) {
+    if (file.size > PUBLIC_FILE_MAX) throw new Error(`"${file.name}" passa de 10 MB.`);
+    const dataUrl = await readAsDataURL(file);
+    const preview = (file.type || "").match(/^(image|video)\//) ? URL.createObjectURL(file) : "";
+    if ((await dbMode()) === "remote") {
+      const comma = dataUrl.indexOf(",");
+      const r = await apiJSON("POST", "/api/public/files", { name: file.name, type: file.type || "", size: file.size, data: dataUrl.slice(comma + 1) })
+        .catch(() => null);
+      if (r && r.ok) { const j = await r.json(); return { id: j.id, name: file.name, type: file.type || "", size: file.size, url: j.url, preview }; }
+      if (r && r.status === 415) throw new Error(`"${file.name}": formato não aceito. Use JPG, PNG, WEBP, MP4, MOV ou PDF.`);
+      if (r && r.status === 413) throw new Error(`"${file.name}" passa de 10 MB.`);
+      throw new Error(`Não foi possível enviar "${file.name}". Tente novamente.`);
+    }
+    return { name: file.name, type: file.type || "", size: file.size, url: dataUrl, preview };
+  },
+  // Documentos do acervo que o fornecedor pode pedir (só nome e descrição).
+  async publicAcervo() {
+    if ((await dbMode()) === "remote") {
+      try { const r = await apiJSON("GET", "/api/public/acervo"); if (r.ok) return (await r.json()).acervo || []; } catch (e) { }
+      return [];
+    }
+    return (_ls.get(ACERVO_KEY, null) || DEFAULT_ACERVO).map(d => ({ id: d.id, nome: d.nome, descricao: d.descricao || "" }));
+  },
+  // Envia a solicitação de cadastro. O servidor gera o protocolo (CAD-AAAA-NNNNNN).
+  async submitCadastro(payload) {
+    if ((await dbMode()) === "remote") {
+      try {
+        const r = await apiJSON("POST", "/api/public/cadastro", payload);
+        const j = await r.json().catch(() => ({}));
+        if (r.status === 201) return { ok: true, ...j };
+        return { ok: false, reason: j.error || "error" };
+      } catch (e) { return { ok: false, reason: "error" }; }
+    }
+    const reqs = _ls.get(REQ_KEY, []) || [];
+    const now = new Date();
+    const year = now.getFullYear();
+    const nums = reqs.filter(r => r.id.startsWith(`CAD-${year}-`)).map(r => parseInt(r.id.split("-")[2], 10)).filter(n => !isNaN(n));
+    const id = `CAD-${year}-${String((nums.length ? Math.max(...nums) : 0) + 1).padStart(6, "0")}`;
+    const d = payload.dados || {};
+    const acervoAll = _ls.get(ACERVO_KEY, null) || DEFAULT_ACERVO;
+    const docs = acervoAll.filter(doc => (payload.docsSolicitados || []).includes(doc.id));
+    const req = {
+      id, tipo: "Cadastro", status: "NOVA", resp: "—", sla: "DENTRO", origem: "publico",
+      abertura: fmtDataBR(now), aberturaTs: now.getTime(), prazo: fmtDataBR(new Date(now.getTime() + 7 * 86400000)),
+      ultimaAtualiz: now.toLocaleString("pt-BR"), ultimaAtualizTs: now.getTime(),
+      parceiro: d.nomeFantasia || d.razaoSocial || `CNPJ ${payload.cnpj}`, cnpj: payload.cnpj, uf: d.estado || "—",
+      email: d.email || "", ie: d.inscricaoEstadual || "", ownerEmail: (d.email || "").toLowerCase(), dados: d,
+      produto: "—", modelo: "—", nf: "—", venda: "—",
+      problema: payload.mensagem || "Solicitação de cadastro / homologação de parceiro.", mensagemCadastro: payload.mensagem || "",
+      anexos: (payload.anexos || []).map(({ preview, ...a }) => a),
+      docsSolicitados: docs.map(doc => doc.nome),
+      docsEnviados: docs.map(doc => ({ nome: doc.nome, url: doc.url || "", tipo: doc.tipo || "link", arquivoType: doc.arquivoType || "" })),
+    };
+    _ls.upsert(REQ_KEY, req, "id");
+    _ls.upsert(NOTIF_KEY, { id: `n-${Date.now()}`, ts: Date.now(), read: false, audience: "interno", requestId: id, color: C.cyan, message: `Nova solicitação de cadastro recebida (${id}) de ${req.parceiro}.` }, "id");
+    return { ok: true, id, abertura: req.abertura, prazo: req.prazo };
+  },
+  // Status de uma solicitação pelo protocolo + CNPJ (não expõe outros dados).
+  async publicStatus(id, cnpj) {
+    if ((await dbMode()) === "remote") {
+      try {
+        const r = await apiJSON("GET", `/api/public/status?id=${encodeURIComponent(id)}&cnpj=${encodeURIComponent(cnpj)}`);
+        if (r.ok) return await r.json();
+      } catch (e) { }
+      return null;
+    }
+    const d = String(cnpj || "").replace(/\D/g, "");
+    const r = (_ls.get(REQ_KEY, []) || []).find(x => x.id === String(id).trim().toUpperCase() && String(x.cnpj || "").replace(/\D/g, "") === d);
+    return r ? { id: r.id, status: r.status, abertura: r.abertura, prazo: r.prazo, ultimaAtualiz: r.ultimaAtualiz || r.abertura } : null;
+  },
+  // Base de clientes gocase (Datamart / Reseller) — só para a equipe logada.
+  async resellerLookup(cnpj) {
+    if ((await dbMode()) === "remote") {
+      try { const r = await apiJSON("GET", `/api/reseller-lookup?cnpj=${encodeURIComponent(cnpj)}`); if (r.ok) return await r.json(); } catch (e) { }
+      return { found: false, error: "lookup_error" };
+    }
+    return { found: false, error: "local" };
   },
 };
 
@@ -450,15 +578,17 @@ async function fetchJSON(url, ms = 8000) {
     return await r.json();
   } finally { clearTimeout(t); }
 }
+// inscricaoEstadual: número (contribuinte) | "" (a fonte confirma que não há IE ativa) | null (fonte não informa).
 async function viaCnpja(d) {
   const j = await fetchJSON(`https://open.cnpja.com/office/${d}`);
   if (!j) return null;
-  const reg = (j.registrations || []).find(x => x.enabled) || (j.registrations || [])[0];
+  const regs = Array.isArray(j.registrations) ? j.registrations : null;
+  const reg = regs ? regs.find(x => x.enabled) : null;
   const ph = (j.phones || [])[0];
   return {
     razaoSocial: j.company?.name || "",
     nomeFantasia: j.alias || j.company?.name || "",
-    inscricaoEstadual: reg?.number || "",
+    inscricaoEstadual: regs ? (reg?.number || "") : null,
     situacao: j.status?.text || "",
     cep: j.address?.zip ? String(j.address.zip).replace(/^(\d{5})(\d{3})$/, "$1-$2") : "",
     logradouro: [j.address?.street, j.address?.number].filter(Boolean).join(", "),
@@ -468,17 +598,19 @@ async function viaCnpja(d) {
     estado: j.address?.state || "",
     telefone: ph ? `(${ph.area}) ${ph.number}` : "",
     email: (j.emails || [])[0]?.address || "",
+    fonte: "Receita Federal (CNPJá)",
   };
 }
 async function viaCnpjWs(d) {
   const j = await fetchJSON(`https://publica.cnpj.ws/cnpj/${d}`);
   if (!j) return null;
   const est = j.estabelecimento || {};
-  const ie = (est.inscricoes_estaduais || []).find(x => x.ativo) || (est.inscricoes_estaduais || [])[0];
+  const ies = Array.isArray(est.inscricoes_estaduais) ? est.inscricoes_estaduais : null;
+  const ie = ies ? ies.find(x => x.ativo) : null;
   return {
     razaoSocial: j.razao_social || "",
     nomeFantasia: est.nome_fantasia || j.razao_social || "",
-    inscricaoEstadual: ie?.inscricao_estadual || "",
+    inscricaoEstadual: ies ? (ie?.inscricao_estadual || "") : null,
     situacao: est.situacao_cadastral || "",
     cep: est.cep ? String(est.cep).replace(/^(\d{5})(\d{3})$/, "$1-$2") : "",
     logradouro: [est.tipo_logradouro, est.logradouro, est.numero].filter(Boolean).join(" "),
@@ -488,6 +620,7 @@ async function viaCnpjWs(d) {
     estado: est.estado?.sigla || "",
     telefone: est.ddd1 && est.telefone1 ? `(${est.ddd1}) ${est.telefone1}` : "",
     email: est.email || "",
+    fonte: "Receita Federal (CNPJ.ws)",
   };
 }
 async function viaBrasilAPI(d) {
@@ -496,7 +629,7 @@ async function viaBrasilAPI(d) {
   return {
     razaoSocial: j.razao_social || "",
     nomeFantasia: j.nome_fantasia || j.razao_social || "",
-    inscricaoEstadual: "",
+    inscricaoEstadual: null, // BrasilAPI não traz inscrição estadual
     situacao: j.descricao_situacao_cadastral || "",
     cep: j.cep ? String(j.cep).replace(/^(\d{5})(\d{3})$/, "$1-$2") : "",
     logradouro: [j.descricao_tipo_de_logradouro, j.logradouro, j.numero].filter(Boolean).join(" "),
@@ -506,19 +639,51 @@ async function viaBrasilAPI(d) {
     estado: j.uf || "",
     telefone: j.ddd_telefone_1 ? j.ddd_telefone_1.replace(/^(\d{2})(\d+)/, "($1) $2") : "",
     email: j.email || "",
+    fonte: "Receita Federal (BrasilAPI)",
   };
 }
+// Consulta o CNPJ nos provedores públicos da Receita e define a situação da IE:
+// ieStatus "contribuinte" (com o número), "isento" (inscricaoEstadual = "ISENTO")
+// ou "desconhecido" (nenhuma fonte informou — o fornecedor preenche).
 async function consultarCNPJ(d) {
   const digits = String(d || "").replace(/\D/g, "");
   if (digits.length !== 14) return null;
-  for (const provider of [viaCnpja, viaCnpjWs, viaBrasilAPI]) {
-    try {
-      const dados = await provider(digits);
-      if (dados && (dados.razaoSocial || dados.nomeFantasia)) return dados;
-    } catch (e) { /* tenta o próximo provedor */ }
+  const providers = [viaCnpja, viaCnpjWs, viaBrasilAPI];
+  let dados = null;
+  for (let i = 0; i < providers.length; i++) {
+    let r = null;
+    try { r = await providers[i](digits); } catch (e) { /* tenta o próximo provedor */ }
+    if (!r || !(r.razaoSocial || r.nomeFantasia)) continue;
+    if (!dados) dados = r;
+    if (r.inscricaoEstadual !== null) {
+      dados = { ...dados, inscricaoEstadual: r.inscricaoEstadual, fonte: dados.fonte === r.fonte ? dados.fonte : `${dados.fonte} · IE via ${r.fonte.replace(/^Receita Federal /, "")}` };
+      break;
+    }
   }
-  return null;
+  if (!dados) return null;
+  const ie = dados.inscricaoEstadual;
+  return {
+    ...dados,
+    inscricaoEstadual: ie ? ie : ie === "" ? "ISENTO" : "",
+    ieStatus: ie ? "contribuinte" : ie === "" ? "isento" : "desconhecido",
+  };
 }
+// CNPJ válido (dígitos verificadores) — mesma regra do servidor.
+function cnpjValido(v) {
+  const d = String(v || "").replace(/\D/g, "");
+  if (d.length !== 14 || /^(\d)\1+$/.test(d)) return false;
+  const dv = (n) => {
+    let soma = 0, peso = n - 7;
+    for (let i = 0; i < n; i++) { soma += Number(d[i]) * peso--; if (peso < 2) peso = 9; }
+    const r = soma % 11;
+    return r < 2 ? 0 : 11 - r;
+  };
+  return dv(12) === Number(d[12]) && dv(13) === Number(d[13]);
+}
+const fmtCnpjInput = (v) => {
+  const d = String(v || "").replace(/\D/g, "").slice(0, 14);
+  return d.replace(/^(\d{2})(\d)/, "$1.$2").replace(/^(\d{2})\.(\d{3})(\d)/, "$1.$2.$3").replace(/\.(\d{3})(\d)/, ".$1/$2").replace(/(\d{4})(\d)/, "$1-$2");
+};
 
 // Indicador de etapas (wizard)
 function Stepper({ step, labels }) {
@@ -556,8 +721,8 @@ const AuthShell = ({ children }) => (
   </div>
 );
 
-/* ===================== Login ===================== */
-function Login({ users, onLogin, goSignup }) {
+/* ===================== Login (equipe interna) ===================== */
+function Login({ onLogin, goBack }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [err, setErr] = useState("");
@@ -567,95 +732,120 @@ function Login({ users, onLogin, goSignup }) {
     setLoading(true);
     const res = await db.login(email, password);
     setLoading(false);
-    if (!res.ok) { setErr(res.reason === "inactive" ? "Conta inativa. Procure um administrador." : "E-mail ou senha inválidos."); return; }
+    if (!res.ok) {
+      setErr(res.reason === "inactive" ? "Conta inativa. Procure um administrador."
+        : res.reason === "throttled" ? "Muitas tentativas. Aguarde 15 minutos e tente de novo."
+        : res.reason === "error" ? "Não foi possível conectar. Tente novamente."
+        : "E-mail ou senha inválidos.");
+      return;
+    }
     setErr(""); onLogin(res.user);
   };
   return (
     <AuthShell>
-      <h1 className="text-xl font-bold" style={{ color: C.text }}>Entrar</h1>
-      <p className="text-sm mb-6" style={{ color: C.muted }}>Acesse com seu e-mail de fornecedor ou corporativo.</p>
+      <button onClick={goBack} className="flex items-center gap-1 text-sm font-semibold mb-4 -mt-2 self-start" style={{ color: C.muted }}>
+        <ArrowLeft size={16} /> Voltar ao formulário de cadastro
+      </button>
+      <h1 className="text-xl font-bold" style={{ color: C.text }}>Portal interno</h1>
+      <p className="text-sm mb-6" style={{ color: C.muted }}>Acesso restrito à equipe gocase — dados, dashboard e relatórios.</p>
       <label className="text-xs font-semibold" style={{ color: C.muted }}>E-mail</label>
-      <input value={email} onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} placeholder="seu@email.com"
+      <input value={email} onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} placeholder="seu@gocase.com"
         className="mt-1 mb-4 w-full rounded-xl border px-3 py-2.5 text-sm outline-none bg-white" style={{ borderColor: C.line }} />
       <label className="text-xs font-semibold" style={{ color: C.muted }}>Senha</label>
       <input type="password" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} placeholder="••••••••"
         className="mt-1 mb-2 w-full rounded-xl border px-3 py-2.5 text-sm outline-none bg-white" style={{ borderColor: C.line }} />
       {err && <div className="text-xs mb-2 font-semibold" style={{ color: C.coral }}>{err}</div>}
-      <a className="text-xs font-semibold self-end mb-5 cursor-pointer" style={{ color: C.coral }}>Esqueci minha senha</a>
-      <button onClick={submit} className="w-full rounded-xl py-2.5 text-sm font-bold text-white" style={{ background: C.coral }}>Entrar</button>
-      <div className="text-center text-sm mt-5" style={{ color: C.muted }}>
-        É fornecedor ou empresa parceira e ainda não tem conta?{" "}
-        <button onClick={goSignup} className="font-bold" style={{ color: C.coral }}>Cadastre-se</button>
-      </div>
+      <p className="text-xs mb-5" style={{ color: C.muted }}>Esqueceu a senha? Peça a um gestor para redefinir.</p>
+      <button onClick={submit} disabled={loading} className="w-full rounded-xl py-2.5 text-sm font-bold text-white inline-flex items-center justify-center gap-2" style={{ background: C.coral, opacity: loading ? .7 : 1 }}>
+        {loading && <Loader2 size={15} className="animate-spin" />}Entrar
+      </button>
     </AuthShell>
   );
 }
 
-/* ===================== Cadastro de cliente ===================== */
-function Signup({ users, onRegister, goLogin }) {
-  const [f, setF] = useState({ nome: "", cnpj: "", contato: "", email: "", telefone: "", password: "", confirm: "" });
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState("");
-  const set = (k) => (e) => setF(s => ({ ...s, [k]: e.target.value }));
-  const localizar = async () => {
-    const d = (f.cnpj || "").replace(/\D/g, "");
-    if (d.length !== 14) { setErr("Informe um CNPJ válido (14 dígitos)."); return; }
-    setErr(""); setLoading(true);
-    try {
-      const res = await fetch(`https://brasilapi.com.br/api/cnpj/v1/${d}`);
-      if (!res.ok) throw new Error();
-      const j = await res.json();
-      setF(s => ({ ...s, nome: j.nome_fantasia || j.razao_social || s.nome, email: s.email || j.email || "", telefone: s.telefone || (j.ddd_telefone_1 ? j.ddd_telefone_1.replace(/^(\d{2})(\d+)/, "($1) $2") : "") }));
-    } catch (e) { setErr("Não foi possível localizar o CNPJ. Preencha manualmente."); }
-    finally { setLoading(false); }
-  };
-  const submit = async () => {
-    if (!f.nome || !f.email || !f.password) { setErr("Preencha nome, e-mail e senha."); return; }
-    if (f.password.length < 6) { setErr("A senha deve ter ao menos 6 caracteres."); return; }
-    if (f.password !== f.confirm) { setErr("As senhas não conferem."); return; }
-    setErr("");
-    const res = await onRegister({ email: f.email.trim(), password: f.password, name: f.nome, role: "CLIENTE", status: "Ativo", cnpj: f.cnpj, telefone: f.telefone, contato: f.contato });
-    if (res && !res.ok) setErr(res.reason === "exists" ? "Já existe uma conta com este e-mail." : "Não foi possível criar a conta. Tente novamente.");
-  };
+/* ===================== Acesso público (fornecedor, sem login) ===================== */
+// Mesmo cabeçalho do portal interno, sem menu lateral: formulário de cadastro,
+// consulta de status e o botão de acesso da equipe.
+function PublicShell({ view, setView, themePref, onCycleTheme, children }) {
+  const tabs = [["form", "Solicitar cadastro", Building2], ["status", "Acompanhar solicitação", Search]];
   return (
-    <AuthShell>
-      <button onClick={goLogin} className="flex items-center gap-1 text-sm font-semibold mb-4 -mt-2 self-start" style={{ color: C.muted }}>
-        <ArrowLeft size={16} /> Voltar
-      </button>
-      <h1 className="text-xl font-bold" style={{ color: C.text }}>Criar conta de fornecedor ou empresa parceira</h1>
-      <p className="text-sm mb-5" style={{ color: C.muted }}>Informe o CNPJ para localizar os dados e defina sua senha de acesso.</p>
-      <label className="text-xs font-semibold" style={{ color: C.muted }}>CNPJ</label>
-      <div className="flex gap-2 mt-1 mb-3">
-        <input value={f.cnpj} onChange={set("cnpj")} placeholder="00.000.000/0000-00" className="flex-1 rounded-xl border px-3 py-2.5 text-sm bg-white" style={{ borderColor: C.line }} />
-        <button onClick={localizar} disabled={loading} className="inline-flex items-center gap-2 rounded-xl px-3 text-sm font-bold text-white" style={{ background: C.coral, opacity: loading ? .7 : 1 }}>
-          {loading ? <Loader2 size={15} className="animate-spin" /> : <Search size={15} />}Localizar
+    <div className="min-h-screen" style={{ background: C.bg }}>
+      <header className="h-16 flex items-center px-4 gap-4 text-white sticky top-0 z-30" style={{ background: C.coral }}>
+        <div onClick={() => setView("form")} className="flex items-center gap-2 cursor-pointer shrink-0">
+          <span className="text-xl font-extrabold lowercase tracking-tight">gocase</span>
+          <span className="text-xs opacity-80 hidden sm:inline whitespace-nowrap">Cadastro de Fornecedores</span>
+        </div>
+        <nav className="flex-1 flex items-center gap-1 min-w-0 overflow-x-auto">
+          {tabs.map(([id, label, Icon]) => (
+            <button key={id} onClick={() => setView(id)} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold whitespace-nowrap transition"
+              style={view === id ? { background: "rgba(255,255,255,.2)" } : { opacity: .85 }}>
+              <Icon size={14} /><span className="hidden sm:inline">{label}</span>
+            </button>
+          ))}
+        </nav>
+        <button onClick={onCycleTheme}
+          title={themePref === "light" ? "Tema: Claro (clique para Escuro)" : themePref === "dark" ? "Tema: Escuro (clique para Automático)" : "Tema: Automático (clique para Claro)"}
+          className="opacity-90 hover:opacity-100 shrink-0">
+          {themePref === "light" ? <Sun size={19} /> : themePref === "dark" ? <Moon size={19} /> : <Monitor size={19} />}
         </button>
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Razão social / Nome fantasia" value={f.nome} onChange={set("nome")} full />
-        <Field label="Nome do contato" value={f.contato} onChange={set("contato")} />
-        <Field label="Telefone" value={f.telefone} onChange={set("telefone")} />
-        <Field label="E-mail de acesso" value={f.email} onChange={set("email")} full />
-        <Field label="Senha" value={f.password} onChange={set("password")} type="password" />
-        <Field label="Confirmar senha" value={f.confirm} onChange={set("confirm")} type="password" />
-      </div>
-      {err && <div className="text-xs mt-3 font-semibold" style={{ color: C.coral }}>{err}</div>}
-      <button onClick={submit} className="w-full rounded-xl py-2.5 text-sm font-bold text-white mt-4" style={{ background: C.coral }}>Criar conta e entrar</button>
-      <div className="text-center text-sm mt-4" style={{ color: C.muted }}>
-        Já tem conta?{" "}<button onClick={goLogin} className="font-bold" style={{ color: C.coral }}>Entrar</button>
-      </div>
-    </AuthShell>
+        <button onClick={() => setView("login")} className="rounded-lg px-3 py-1.5 text-xs font-bold shrink-0 inline-flex items-center gap-1.5" style={{ background: C.accent, color: C.ink }}>
+          <ShieldCheck size={14} /><span className="hidden sm:inline">Acesso da equipe</span>
+        </button>
+      </header>
+      <main className="p-4 sm:p-6 w-full max-w-3xl mx-auto">{children}</main>
+    </div>
+  );
+}
+
+// Consulta pública do andamento: protocolo + CNPJ (não mostra nenhum outro dado).
+function ConsultaStatus() {
+  const [id, setId] = useState("");
+  const [cnpj, setCnpj] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [res, setRes] = useState(null);
+  const [err, setErr] = useState("");
+  const consultar = async () => {
+    if (!id.trim() || !cnpjValido(cnpj)) { setErr("Informe o número do protocolo e um CNPJ válido."); return; }
+    setErr(""); setLoading(true);
+    const r = await db.publicStatus(id.trim(), cnpj);
+    setLoading(false);
+    if (!r) { setRes(null); setErr("Não encontramos uma solicitação com esse protocolo e CNPJ."); return; }
+    setRes(r);
+  };
+  const st = res ? (STATUS[res.status] || STATUS.NOVA) : null;
+  return (
+    <div>
+      <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Fornecedor</div>
+      <h1 className="text-2xl font-bold" style={{ color: C.text }}>Acompanhar solicitação</h1>
+      <p className="text-sm mb-5" style={{ color: C.muted }}>Informe o protocolo recebido ao enviar o cadastro e o CNPJ da empresa.</p>
+      <Card className="p-5 mb-4">
+        <div className="grid sm:grid-cols-2 gap-4">
+          <Field label="Protocolo" value={id} onChange={e => setId(e.target.value.toUpperCase())} />
+          <Field label="CNPJ" value={cnpj} onChange={e => setCnpj(fmtCnpjInput(e.target.value))} />
+        </div>
+        {err && <div className="text-xs mt-3 font-semibold" style={{ color: C.danger }}>{err}</div>}
+        <div className="mt-4"><Btn icon={loading ? Loader2 : Search} onClick={consultar}>{loading ? "Consultando…" : "Consultar"}</Btn></div>
+      </Card>
+      {res && (
+        <Card className="p-5">
+          <div className="flex items-center gap-3 flex-wrap mb-3">
+            <span className="font-mono text-lg font-bold" style={{ color: C.text }}>{res.id}</span>
+            <Pill label={st.label} color={st.color} />
+          </div>
+          <div className="grid sm:grid-cols-3 gap-3 text-sm">
+            {[["Aberta em", res.abertura], ["Prazo de análise", res.prazo], ["Última atualização", res.ultimaAtualiz]].map(([k, v]) => (
+              <div key={k}><div className="text-xs" style={{ color: C.muted }}>{k}</div><div className="font-medium" style={{ color: C.text }}>{v || "—"}</div></div>
+            ))}
+          </div>
+        </Card>
+      )}
+    </div>
   );
 }
 
 /* ===================== Menus ===================== */
+// Só o portal interno tem menu — o fornecedor usa o acesso público (PublicShell).
 const MENU = {
-  externo: [
-    { id: "inicio", label: "Início", icon: Home },
-    { id: "nova-cad", label: "Solicitação de Cadastro", icon: Building2 },
-    { id: "minhas", label: "Minhas Solicitações", icon: FileText },
-    { id: "perfil", label: "Perfil", icon: UserIcon },
-  ],
   interno: [
     { id: "dash", label: "Dashboard", icon: LayoutDashboard },
     { id: "lista-cad", label: "Cadastros", icon: FileCheck },
@@ -664,11 +854,12 @@ const MENU = {
     { id: "usuarios", label: "Usuários", icon: Users },
     { id: "relatorios", label: "Relatórios", icon: BarChart3 },
     { id: "config", label: "Configurações", icon: Settings },
+    { id: "conta", label: "Minha conta", icon: UserIcon },
   ],
 };
 
 /* ===================== Shell ===================== */
-function Shell({ portal, switchPortal, view, nav, onLogout, notifOpen, setNotifOpen, user, notifs, badge, onOpenNotifs, themePref, onCycleTheme, requests, children }) {
+function Shell({ portal, view, nav, onLogout, notifOpen, setNotifOpen, user, notifs, badge, onOpenNotifs, themePref, onCycleTheme, requests, children }) {
   const initials = (user?.name || "?").split(" ").filter(Boolean).slice(0, 2).map(s => s[0]).join("").toUpperCase();
   const staff = ["ADMIN", "GESTOR", "COLABORADOR"].includes(user?.role);
   const [fs, setFs] = useState(false);
@@ -751,12 +942,6 @@ function Shell({ portal, switchPortal, view, nav, onLogout, notifOpen, setNotifO
             </div>
           )}
         </div>
-        {staff && (
-          <button onClick={() => switchPortal(portal === "externo" ? "interno" : "externo")}
-            className="rounded-lg px-3 py-1.5 text-xs font-bold" style={{ background: C.accent, color: C.ink }}>
-            Portal {portal === "externo" ? "interno" : "externo"}
-          </button>
-        )}
         <button onClick={onCycleTheme}
           title={themePref === "light" ? "Tema: Claro (clique para Escuro)" : themePref === "dark" ? "Tema: Escuro (clique para Automático)" : "Tema: Automático (clique para Claro)"}
           className="opacity-90 hover:opacity-100">
@@ -1064,6 +1249,37 @@ function ChatPanel({ r, currentUser, onSendMsg, onReopenRequest }) {
   );
 }
 
+/* Consulta o CNPJ na base de clientes gocase (Reseller / Datamart). Depende da
+   sessão da plataforma GoDeploy de quem está logado — sem ela aparece como indisponível. */
+function ResellerCard({ cnpj }) {
+  const [res, setRes] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    setRes(null);
+    db.resellerLookup(cnpj).then(r => { if (alive) setRes(r || { found: false, error: "lookup_error" }); });
+    return () => { alive = false; };
+  }, [cnpj]);
+  const indisponivel = res && !res.found && res.error;
+  return (
+    <Card className="p-4 flex items-start gap-3">
+      <span className="rounded-lg p-2 shrink-0" style={{ background: C.coralSoft, color: C.coral }}><Users size={16} /></span>
+      <div className="text-sm min-w-0">
+        <div className="font-bold" style={{ color: C.text }}>Base de clientes gocase (Reseller)</div>
+        {!res ? <div className="flex items-center gap-2" style={{ color: C.muted }}><Loader2 size={13} className="animate-spin" /> Consultando…</div>
+          : res.found ? <>
+              <div style={{ color: C.text }}>CNPJ já está na base: <b>{res.nomeFantasia || res.razaoSocial}</b>{res.razaoSocial && res.nomeFantasia !== res.razaoSocial ? ` (${res.razaoSocial})` : ""}.</div>
+              <div className="text-xs mt-0.5" style={{ color: C.muted }}>
+                IE no Reseller: <b style={{ color: C.text }}>{res.inscricaoEstadual || "não informada"}</b>
+                {res.contribuinteIcms ? <> · Contribuinte ICMS: <b style={{ color: C.text }}>{res.contribuinteIcms}</b></> : null}
+              </div>
+            </>
+          : indisponivel ? <div style={{ color: C.muted }}>Consulta indisponível agora{res.error === "not_authenticated" ? " — entre na plataforma GoDeploy neste navegador para habilitar" : ""}.</div>
+          : <div style={{ color: C.muted }}>CNPJ não encontrado na base de clientes.</div>}
+      </div>
+    </Card>
+  );
+}
+
 /* ===================== Detalhe ===================== */
 function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopenRequest }) {
   if (!r) return null;
@@ -1080,14 +1296,29 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
       <div className="grid lg:grid-cols-3 gap-5">
         <div className="lg:col-span-2 space-y-5">
           <Card className="p-5">
-            <h2 className="font-bold mb-3" style={{ color: C.text }}>Dados do fornecedor</h2>
+            <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+              <h2 className="font-bold" style={{ color: C.text }}>Dados do fornecedor</h2>
+              {r.dados?.fonte && <span className="text-[11px]" style={{ color: C.muted }}>Fonte: {r.dados.fonte}</span>}
+            </div>
             <div className="grid grid-cols-2 gap-3 text-sm">
-              {[["Fornecedor", r.parceiro], ["CNPJ", r.cnpj], ["UF", r.uf], ["E-mail", r.email || "—"]].map(([k, v]) =>
-                <div key={k}><div className="text-xs" style={{ color: C.muted }}>{k}</div><div className="font-medium" style={{ color: C.text }}>{v}</div></div>)}
+              {(() => {
+                const d = r.dados || {};
+                const ie = (d.inscricaoEstadual || r.ie || "").trim();
+                const endereco = [d.logradouro, d.complemento, d.bairro, [d.municipio, d.estado].filter(Boolean).join("/"), d.cep].filter(Boolean).join(" · ");
+                return [
+                  ["Razão social", d.razaoSocial || r.parceiro], ["Nome fantasia", d.nomeFantasia || "—"],
+                  ["CNPJ", r.cnpj], ["Inscrição estadual", ie ? (ie.toUpperCase() === "ISENTO" ? "Isento" : ie) : "Não informada"],
+                  ["Situação cadastral", d.situacao || "—"], ["UF", r.uf],
+                  ["Contato", d.nomeContato || "—"], ["Telefone", d.telefone || "—"],
+                  ["E-mail", r.email || "—"], ["Endereço", endereco || "—"],
+                ];
+              })().map(([k, v]) =>
+                <div key={k}><div className="text-xs" style={{ color: C.muted }}>{k}</div><div className="font-medium break-words" style={{ color: C.text }}>{v}</div></div>)}
             </div>
           </Card>
+          {interno && <ResellerCard cnpj={r.cnpj} />}
           <Card className="p-5">
-            <h2 className="font-bold mb-3" style={{ color: C.text }}>Anexos enviados pelo cliente</h2>
+            <h2 className="font-bold mb-3" style={{ color: C.text }}>Anexos enviados pelo fornecedor</h2>
             {(r.anexos && r.anexos.length > 0) ? (
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 {r.anexos.map((a, i) => {
@@ -1110,15 +1341,15 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
                 })}
               </div>
             ) : (
-              <p className="text-sm" style={{ color: C.muted }}>Nenhum anexo enviado pelo cliente nesta solicitação.</p>
+              <p className="text-sm" style={{ color: C.muted }}>Nenhum anexo enviado pelo fornecedor nesta solicitação.</p>
             )}
           </Card>
-          {/* Mensagem do cliente — visível para equipe interna */}
+          {/* Mensagem do fornecedor — visível para equipe interna */}
           {(r.mensagemCadastro || (r.tipo === "Cadastro" && r.problema && r.problema !== "Solicitação de cadastro / homologação de parceiro.")) && (
             <Card className="p-5" style={{ borderColor: C.cyan + "50", background: C.cyan + "08" }}>
               <div className="flex items-center gap-2 mb-2">
                 <MessageSquare size={16} style={{ color: C.cyan }} />
-                <h2 className="font-bold text-sm" style={{ color: C.text }}>Mensagem do cliente</h2>
+                <h2 className="font-bold text-sm" style={{ color: C.text }}>Mensagem do fornecedor</h2>
               </div>
               <p className="text-sm whitespace-pre-wrap" style={{ color: C.text }}>
                 {r.mensagemCadastro || r.problema}
@@ -1127,7 +1358,7 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
           )}
           {r.docsSolicitados && r.docsSolicitados.length > 0 && (
             <Card className="p-5">
-              <h2 className="font-bold mb-3" style={{ color: C.text }}>Documentos solicitados pelo cliente à gocase</h2>
+              <h2 className="font-bold mb-3" style={{ color: C.text }}>Documentos que o fornecedor pediu à gocase</h2>
               <div className="space-y-2">
                 {r.docsSolicitados.map((d, i) => <div key={i} className="flex items-center gap-2 text-sm" style={{ color: C.text }}><FileCheck size={15} style={{ color: C.coral }} /> {d}</div>)}
               </div>
@@ -1135,8 +1366,8 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
           )}
           {r.docsEnviados && r.docsEnviados.length > 0 && (
             <Card className="p-5">
-              <h2 className="font-bold mb-1" style={{ color: C.text }}>Documentos enviados pela gocase</h2>
-              <p className="text-xs mb-3" style={{ color: C.muted }}>Enviados automaticamente pelo sistema ao registrar a solicitação. Clique para baixar.</p>
+              <h2 className="font-bold mb-1" style={{ color: C.text }}>Documentos do acervo para enviar</h2>
+              <p className="text-xs mb-3" style={{ color: C.muted }}>Links do acervo correspondentes ao pedido — envie ao fornecedor após a análise. Clique para abrir.</p>
               <div className="grid sm:grid-cols-2 gap-2">
                 {r.docsEnviados.map((d, i) => (
                   <button key={i} onClick={() => abrirDoc(d, null)}
@@ -1199,74 +1430,55 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
   );
 }
 
-/* ===================== External screens ===================== */
-function ExtInicio({ nav, requests, user }) {
-  const nome = user?.name || "fornecedor";
-  const mine = requests.filter(r => r.ownerEmail ? r.ownerEmail === user?.email : r.parceiro === nome);
-  const count = (s) => mine.filter(r => r.status === s).length;
-  return (
-    <div>
-      <h1 className="text-2xl font-bold" style={{ color: C.text }}>Olá, {nome} 👋</h1>
-      <p className="text-sm mb-6" style={{ color: C.muted }}>Acompanhe suas solicitações de cadastro e homologação como fornecedor gocase.</p>
-      <div className="grid sm:grid-cols-3 gap-4 mb-6">
-        <StatCard icon={Clock} label="Em aberto" value={mine.filter(r => ["NOVA", "EM_ANALISE", "AGUARDANDO"].includes(r.status)).length} color={C.yellow} onClick={() => nav("minhas")} />
-        <StatCard icon={RefreshCw} label="Em análise" value={count("EM_ANALISE")} color={C.violet} onClick={() => nav("minhas")} />
-        <StatCard icon={CheckCircle2} label="Concluídas" value={count("CONCLUIDA")} color={C.green} onClick={() => nav("minhas")} />
-      </div>
-      <Card className="p-5">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="font-bold" style={{ color: C.text }}>Solicitações recentes</h2>
-          <Btn icon={Plus} onClick={() => nav("nova-cad")}>Nova solicitação</Btn>
-        </div>
-        <div className="divide-y" style={{ borderColor: C.line }}>
-          {mine.length === 0 && <div className="py-6 text-center text-sm" style={{ color: C.muted }}>Você ainda não tem solicitações de cadastro.</div>}
-          {mine.map(r => (
-            <button key={r.id} onClick={() => nav("detalhe", r.id)} className="w-full flex items-center gap-4 py-3 px-2 hover:bg-gray-50 rounded-lg text-left">
-              <div className="font-mono text-sm font-semibold" style={{ color: C.coral }}>{r.id}</div>
-              <div className="flex-1 text-sm truncate" style={{ color: C.text }}>{r.problema}</div>
-              <div className="text-xs hidden sm:block" style={{ color: C.muted }}>{r.abertura}</div>
-              <Pill {...STATUS[r.status]} /><ChevronRight size={16} style={{ color: C.muted }} />
-            </button>
-          ))}
-        </div>
-      </Card>
-    </div>
-  );
-}
-
-function ExtNovaCad({ nav, toast, onCreate, acervo }) {
+/* ===================== External screens (acesso público) ===================== */
+// Solicitação de cadastro aberta a qualquer pessoa: só o CNPJ é obrigatório. Ao
+// digitar os 14 dígitos, os dados são buscados na Receita Federal, inclusive se a
+// empresa tem Inscrição Estadual ativa ou é isenta.
+function ExtNovaCad({ toast, acervo, goStatus }) {
   const docsDisponiveis = acervo || [];
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [enviando, setEnviando] = useState(false);
   const [erro, setErro] = useState("");
   const [consultado, setConsultado] = useState(false);
-  const [f, setF] = useState({
+  const [ieStatus, setIeStatus] = useState(""); // contribuinte | isento | desconhecido
+  const [fonte, setFonte] = useState("");
+  const ieConsultadaRef = useRef(""); // IE que veio da consulta (restaurada ao desmarcar "isento")
+  const [protocolo, setProtocolo] = useState(null);
+  const vazio = {
     cnpj: "", nomeContato: "", telefone: "", email: "",
     razaoSocial: "", nomeFantasia: "", inscricaoEstadual: "", situacao: "",
     cep: "", logradouro: "", bairro: "", municipio: "", estado: "", complemento: "",
-  });
+  };
+  const [f, setF] = useState(vazio);
   const [meusDocs, setMeusDocs] = useState([]);
+  const [uploadKey, setUploadKey] = useState(0);
   const [solicitar, setSolicitar] = useState({}); // chaveado por id do documento do acervo
   const [mensagem, setMensagem] = useState("");
   const set = (k) => (e) => setF(s => ({ ...s, [k]: e.target.value }));
   const toggleDoc = (id) => setSolicitar(s => ({ ...s, [id]: !s[id] }));
+  const isento = f.inscricaoEstadual.trim().toUpperCase() === "ISENTO";
+  const cnpjOk = cnpjValido(f.cnpj);
 
   const localizar = async () => {
     const d = (f.cnpj || "").replace(/\D/g, "");
-    if (d.length !== 14) { setErro("Informe um CNPJ válido (14 dígitos)."); return; }
+    if (!cnpjValido(d)) { setErro("Informe um CNPJ válido (14 dígitos)."); return; }
     setErro(""); setLoading(true);
     const dados = await consultarCNPJ(d);
     setConsultado(true); setLoading(false);
     if (!dados) {
-      setErro("Não foi possível consultar o CNPJ agora. No preview do Claude as consultas externas são bloqueadas (funciona no site publicado). Você pode preencher os campos manualmente.");
-      toast("Não foi possível localizar este CNPJ. Preencha os campos manualmente.");
+      setIeStatus("desconhecido"); setFonte("");
+      setErro("Não foi possível consultar o CNPJ agora. Você pode preencher os dados manualmente ou tentar de novo.");
       return;
     }
     setErro("");
-    setF(s => ({ ...s, ...dados }));
-    toast(dados.inscricaoEstadual
-      ? "Dados localizados, incluindo a inscrição estadual."
-      : "Dados localizados. Inscrição estadual indisponível — preencha se necessário.");
+    const { ieStatus: st, fonte: fnt, ...campos } = dados;
+    setF(s => ({ ...s, ...campos, cnpj: s.cnpj }));
+    setIeStatus(st); setFonte(fnt || "");
+    ieConsultadaRef.current = st === "contribuinte" ? campos.inscricaoEstadual : "";
+    toast(st === "contribuinte" ? "Dados localizados, incluindo a inscrição estadual."
+      : st === "isento" ? "Dados localizados. Nenhuma inscrição estadual ativa: marcado como Isento."
+      : "Dados localizados. Não foi possível verificar a inscrição estadual — preencha ou marque Isento.");
   };
 
   // Busca automática: assim que o CNPJ tem 14 dígitos, consulta sozinho (com debounce),
@@ -1282,49 +1494,102 @@ function ExtNovaCad({ nav, toast, onCreate, acervo }) {
     if (digits.length < 14) autoRef.current = "";
   }, [f.cnpj]);
 
-  const finalizar = () => {
-    const selecionados = docsDisponiveis.filter(d => solicitar[d.id]);
-    onCreate({
-      tipo: "Cadastro", status: "NOVA", resp: "—",
-      parceiro: f.nomeFantasia || f.razaoSocial || "Novo parceiro",
-      cnpj: f.cnpj, uf: f.estado || "—", email: f.email, ie: f.inscricaoEstadual,
-      produto: "—", modelo: "—", nf: "—", venda: "—",
-      problema: mensagem.trim() || "Solicitação de cadastro / homologação de parceiro.",
-      mensagemCadastro: mensagem.trim(),
-      anexos: meusDocs,
-      docsSolicitados: selecionados.map(d => d.nome),
-      docsEnviados: selecionados.map(d => ({ nome: d.nome, url: d.url || "", tipo: d.tipo || "link", arquivoType: d.arquivoType || "" })),
-    });
-    toast(selecionados.length
-      ? `Cadastro enviado! ${selecionados.length} documento(s) já enviados automaticamente na sua solicitação.`
-      : "Cadastro enviado para análise! Já aparece no portal interno.");
-    nav("minhas");
+  const avancar = () => {
+    if (!cnpjOk) { setErro("Informe um CNPJ válido para continuar."); return; }
+    setErro(""); setStep(2);
   };
 
+  const finalizar = async () => {
+    if (enviando) return;
+    setEnviando(true);
+    const { cnpj, ...dados } = f;
+    const res = await db.submitCadastro({
+      cnpj,
+      dados: { ...dados, fonte },
+      mensagem: mensagem.trim(),
+      anexos: meusDocs.map(({ preview, ...a }) => a),
+      docsSolicitados: docsDisponiveis.filter(d => solicitar[d.id]).map(d => d.id),
+    });
+    setEnviando(false);
+    if (!res.ok) {
+      toast(res.reason === "invalid_cnpj" ? "CNPJ inválido. Confira o número." : "Não foi possível enviar agora. Tente novamente em instantes.");
+      return;
+    }
+    setProtocolo({ id: res.id, abertura: res.abertura, prazo: res.prazo, cnpj });
+  };
+
+  const novaSolicitacao = () => {
+    setF(vazio); setMeusDocs([]); setUploadKey(k => k + 1); setSolicitar({}); setMensagem("");
+    setConsultado(false); setIeStatus(""); setFonte(""); setErro(""); setProtocolo(null); setStep(1);
+    ieConsultadaRef.current = "";
+    autoRef.current = "";
+  };
+
+  if (protocolo) return (
+    <div>
+      <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Fornecedor</div>
+      <h1 className="text-2xl font-bold mb-5" style={{ color: C.text }}>Solicitação enviada!</h1>
+      <Stepper step={4} labels={["Identificação", "Documentos", "Revisão"]} />
+      <Card className="p-6 text-center" style={{ borderColor: C.green + "55" }}>
+        <CheckCircle2 size={40} className="mx-auto mb-3" style={{ color: C.green }} />
+        <div className="text-sm mb-1" style={{ color: C.muted }}>Seu protocolo</div>
+        <div className="font-mono text-2xl font-bold mb-3" style={{ color: C.text }}>{protocolo.id}</div>
+        <p className="text-sm max-w-md mx-auto" style={{ color: C.muted }}>
+          A equipe de cadastro da gocase vai analisar sua solicitação até <b style={{ color: C.text }}>{protocolo.prazo}</b>.
+          Guarde o protocolo: com ele e o CNPJ ({protocolo.cnpj}) você acompanha o andamento.
+        </p>
+        <div className="flex gap-2 justify-center mt-5 flex-wrap">
+          <Btn icon={Search} onClick={goStatus}>Acompanhar solicitação</Btn>
+          <Btn variant="outline" icon={Plus} onClick={novaSolicitacao}>Nova solicitação</Btn>
+        </div>
+      </Card>
+    </div>
+  );
+
   return (
-    <div className="max-w-3xl">
+    <div>
       <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Fornecedor</div>
       <h1 className="text-2xl font-bold" style={{ color: C.text }}>Solicitação de Cadastro</h1>
-      <p className="text-sm mb-5" style={{ color: C.muted }}>Preencha os dados para iniciar o processo de homologação junto à gocase.</p>
-      <Stepper step={step} labels={["Identificação", "Documentos", "Concluído"]} />
+      <p className="text-sm mb-5" style={{ color: C.muted }}>Informe o CNPJ da empresa para iniciar o processo de homologação junto à gocase. Não é preciso criar conta.</p>
+      <Stepper step={step} labels={["Identificação", "Documentos", "Revisão"]} />
 
       {step === 1 && (
         <>
           <Card className="p-5 mb-4">
-            <label className="text-xs font-semibold" style={{ color: C.muted }}>CNPJ</label>
+            <label className="text-xs font-semibold" style={{ color: C.muted }}>CNPJ <span style={{ color: C.danger }}>*</span></label>
             <div className="flex gap-2 mt-1">
-              <input value={f.cnpj} onChange={set("cnpj")} placeholder="00.000.000/0000-00" className="flex-1 rounded-xl border px-3 py-2 text-sm bg-white" style={{ borderColor: C.line }} />
-              <button onClick={localizar} disabled={loading} className="inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold text-white" style={{ background: C.coral, opacity: loading ? 0.7 : 1 }}>
-                {loading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}{loading ? "Localizando…" : "Localizar dados"}
+              <input value={f.cnpj} onChange={e => setF(s => ({ ...s, cnpj: fmtCnpjInput(e.target.value) }))} inputMode="numeric" placeholder="00.000.000/0000-00" className="flex-1 min-w-0 rounded-xl border px-3 py-2 text-sm bg-white" style={{ borderColor: C.line }} />
+              <button onClick={localizar} disabled={loading} className="inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold text-white shrink-0" style={{ background: C.coral, opacity: loading ? 0.7 : 1 }}>
+                {loading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}<span className="hidden sm:inline">{loading ? "Localizando…" : "Localizar dados"}</span>
               </button>
             </div>
-            {erro && <div className="text-xs mt-2 font-semibold" style={{ color: C.coral }}>{erro}</div>}
-            <p className="text-xs mt-2" style={{ color: C.muted }}>A busca é automática ao digitar os 14 dígitos do CNPJ — os campos abaixo são preenchidos sozinhos a partir da Receita Federal. Você também pode clicar em Localizar, e ajustar qualquer campo depois.</p>
+            {f.cnpj.replace(/\D/g, "").length === 14 && !cnpjOk && <div className="text-xs mt-2 font-semibold" style={{ color: C.danger }}>CNPJ inválido — confira os dígitos.</div>}
+            {erro && <div className="text-xs mt-2 font-semibold" style={{ color: C.danger }}>{erro}</div>}
+            <p className="text-xs mt-2" style={{ color: C.muted }}>A busca é automática ao digitar os 14 dígitos: os dados vêm da Receita Federal, inclusive a Inscrição Estadual (ou se a empresa é isenta). Você pode ajustar qualquer campo depois.</p>
           </Card>
 
           {consultado && (
             <Card className="p-5 mb-4">
-              <div className="flex items-center gap-2 mb-3 text-sm font-semibold" style={{ color: C.cyan }}><FileCheck size={16} /> Dados cadastrais</div>
+              <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+                <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: C.cyan }}><FileCheck size={16} /> Dados cadastrais</div>
+                {fonte && <span className="text-[11px]" style={{ color: C.muted }}>Fonte: {fonte}</span>}
+              </div>
+              <div className="rounded-xl border px-3 py-2.5 mb-4 flex items-center gap-2 flex-wrap text-sm" style={{ borderColor: C.line }}>
+                <span className="font-semibold" style={{ color: C.text }}>Inscrição Estadual:</span>
+                {isento
+                  ? <Pill label="Isento" color={C.violet} />
+                  : f.inscricaoEstadual.trim()
+                    ? <Pill label={`Contribuinte · IE ${f.inscricaoEstadual}`} color={C.green} />
+                    : <Pill label="Não verificada" color={C.yellow} />}
+                <label className="ml-auto flex items-center gap-2 text-xs cursor-pointer" style={{ color: C.muted }}>
+                  <input type="checkbox" checked={isento} className="w-4 h-4" style={{ accentColor: C.coral }}
+                    onChange={e => setF(s => ({ ...s, inscricaoEstadual: e.target.checked ? "ISENTO" : ieConsultadaRef.current }))} />
+                  Empresa isenta de IE
+                </label>
+              </div>
+              {ieStatus === "desconhecido" && !f.inscricaoEstadual.trim() && (
+                <p className="text-xs mb-3 -mt-2" style={{ color: C.muted }}>Não foi possível confirmar a IE na consulta. Informe o número ou marque "Empresa isenta de IE".</p>
+              )}
               <div className="grid sm:grid-cols-2 gap-4">
                 <Field label="Razão social" value={f.razaoSocial} onChange={set("razaoSocial")} />
                 <Field label="Nome fantasia" value={f.nomeFantasia} onChange={set("nomeFantasia")} />
@@ -1332,7 +1597,7 @@ function ExtNovaCad({ nav, toast, onCreate, acervo }) {
                 <Field label="Situação cadastral" value={f.situacao} onChange={set("situacao")} />
                 <Field label="Nome do contato" value={f.nomeContato} onChange={set("nomeContato")} />
                 <Field label="Telefone" value={f.telefone} onChange={set("telefone")} />
-                <Field label="E-mail" value={f.email} onChange={set("email")} full />
+                <Field label="E-mail para retorno" value={f.email} onChange={set("email")} full />
                 <Field label="CEP" value={f.cep} onChange={set("cep")} />
                 <Field label="Logradouro" value={f.logradouro} onChange={set("logradouro")} />
                 <Field label="Bairro" value={f.bairro} onChange={set("bairro")} />
@@ -1344,9 +1609,7 @@ function ExtNovaCad({ nav, toast, onCreate, acervo }) {
           )}
 
           <div className="flex justify-end">
-            <Btn onClick={() => { if (!f.cnpj && !f.razaoSocial) { setErro("Informe e localize um CNPJ, ou preencha manualmente."); return; } setStep(2); }}>
-              Próximo: Documentos
-            </Btn>
+            <Btn onClick={avancar}>Próximo: Documentos</Btn>
           </div>
         </>
       )}
@@ -1356,12 +1619,13 @@ function ExtNovaCad({ nav, toast, onCreate, acervo }) {
           <Card className="p-5 mb-4">
             <div className="flex items-center gap-2 mb-1">
               <span className="rounded-lg p-2" style={{ background: C.coralSoft, color: C.coral }}><Package size={16} /></span>
-              <h2 className="font-bold" style={{ color: C.text }}>Documentos</h2>
+              <h2 className="font-bold" style={{ color: C.text }}>Documentos (opcional)</h2>
             </div>
-            <p className="text-sm mb-4" style={{ color: C.muted }}>Envie os seus e selecione o que precisa receber da gocase.</p>
+            <p className="text-sm mb-4" style={{ color: C.muted }}>Envie os documentos da sua empresa e indique o que precisa receber da gocase.</p>
 
             <div className="text-xs font-semibold mb-2 flex items-center gap-1" style={{ color: C.text }}><Send size={13} /> Enviar meus documentos</div>
-            <FileUpload onFiles={setMeusDocs} />
+            <FileUpload key={uploadKey} initial={meusDocs} onFiles={setMeusDocs} upload={(file) => db.uploadPublicFile(file)}
+              hint="Clique ou arraste para adicionar — imagens (JPG, PNG, WEBP), vídeos (MP4, MOV) e PDF, até 10 MB cada" />
 
             <div className="text-xs font-semibold mt-5 mb-2 flex items-center gap-1" style={{ color: C.text }}><Download size={13} /> Solicitar da gocase</div>
             {docsDisponiveis.length === 0 ? (
@@ -1385,7 +1649,7 @@ function ExtNovaCad({ nav, toast, onCreate, acervo }) {
                 })}
               </div>
             )}
-            <p className="text-xs mt-2" style={{ color: C.muted }}>Os documentos marcados são enviados automaticamente na sua solicitação assim que você concluir o cadastro.</p>
+            <p className="text-xs mt-2" style={{ color: C.muted }}>A equipe gocase envia os documentos marcados pelo e-mail informado, depois da análise inicial.</p>
 
             {/* Caixa de mensagem */}
             <div className="mt-5 border-t pt-4" style={{ borderColor: C.line }}>
@@ -1398,19 +1662,17 @@ function ExtNovaCad({ nav, toast, onCreate, acervo }) {
               <textarea
                 value={mensagem}
                 onChange={e => setMensagem(e.target.value)}
-                placeholder="Ex.: Somos uma nova loja de acessórios em São Paulo, gostaríamos de entender as condições comerciais para revenda de capinhas gocase. Já trabalhamos com outras marcas no segmento e temos interesse em parceria..."
+                placeholder="Ex.: Somos fornecedores de embalagens e gostaríamos de nos cadastrar para participar das próximas cotações da gocase..."
                 rows={4}
+                maxLength={4000}
                 className="w-full rounded-xl border px-3 py-2.5 text-sm resize-none bg-white"
                 style={{ borderColor: C.line }}
               />
-              <p className="text-xs mt-1" style={{ color: C.muted }}>
-                Sua mensagem ficará registrada na solicitação e será lida pela equipe de cadastro.
-              </p>
             </div>
           </Card>
           <div className="flex justify-between">
             <Btn variant="outline" color={C.muted} icon={ArrowLeft} onClick={() => setStep(1)}>Voltar</Btn>
-            <Btn onClick={() => setStep(3)}>Próximo: Concluir</Btn>
+            <Btn onClick={() => setStep(3)}>Próximo: Revisão</Btn>
           </div>
         </>
       )}
@@ -1420,7 +1682,7 @@ function ExtNovaCad({ nav, toast, onCreate, acervo }) {
           <Card className="p-5 mb-4">
             <div className="flex items-center gap-2 mb-3 text-sm font-semibold" style={{ color: C.green }}><CheckCircle2 size={16} /> Revisão final</div>
             <div className="grid sm:grid-cols-2 gap-3 text-sm">
-              {[["Empresa", f.nomeFantasia || f.razaoSocial || "—"], ["CNPJ", f.cnpj || "—"], ["Inscrição estadual", f.inscricaoEstadual || "—"], ["Município/UF", `${f.municipio || "—"}/${f.estado || "—"}`], ["Contato", f.nomeContato || "—"], ["E-mail", f.email || "—"]].map(([k, v]) => (
+              {[["Empresa", f.nomeFantasia || f.razaoSocial || "—"], ["CNPJ", f.cnpj || "—"], ["Inscrição estadual", isento ? "Isento" : (f.inscricaoEstadual || "Não informada")], ["Município/UF", `${f.municipio || "—"}/${f.estado || "—"}`], ["Contato", f.nomeContato || "—"], ["E-mail", f.email || "—"]].map(([k, v]) => (
                 <div key={k}><div className="text-xs" style={{ color: C.muted }}>{k}</div><div className="font-medium" style={{ color: C.text }}>{v}</div></div>
               ))}
             </div>
@@ -1430,16 +1692,22 @@ function ExtNovaCad({ nav, toast, onCreate, acervo }) {
             </div>
             <div className="mt-3 text-sm">
               <div className="text-xs" style={{ color: C.muted }}>Mensagem para a equipe</div>
-              <div className="font-medium" style={{ color: C.text }}>{mensagem.trim() || <span style={{ color: C.muted, fontStyle: "italic" }}>Nenhuma mensagem</span>}</div>
+              <div className="font-medium whitespace-pre-wrap" style={{ color: C.text }}>{mensagem.trim() || <span style={{ color: C.muted, fontStyle: "italic" }}>Nenhuma mensagem</span>}</div>
             </div>
             <div className="mt-3 text-sm">
               <div className="text-xs" style={{ color: C.muted }}>Documentos solicitados da gocase</div>
               <div className="font-medium" style={{ color: C.text }}>{docsDisponiveis.filter(d => solicitar[d.id]).map(d => d.nome).join(", ") || "Nenhum"}</div>
             </div>
+            {!f.email.trim() && !f.telefone.trim() && (
+              <div className="mt-4 rounded-xl border px-3 py-2.5 text-xs flex items-start gap-2" style={{ borderColor: C.yellow + "66", background: C.yellow + "14", color: C.text }}>
+                <AlertTriangle size={14} className="mt-0.5 shrink-0" style={{ color: C.yellow }} />
+                Sem e-mail ou telefone, a equipe só consegue retornar pelo acompanhamento com o protocolo. Recomendamos informar um contato.
+              </div>
+            )}
           </Card>
           <div className="flex justify-between">
             <Btn variant="outline" color={C.muted} icon={ArrowLeft} onClick={() => setStep(2)}>Voltar</Btn>
-            <Btn icon={Send} color={C.green} onClick={finalizar}>Concluir e enviar</Btn>
+            <Btn icon={enviando ? Loader2 : Send} color={C.green} onClick={finalizar}>{enviando ? "Enviando…" : "Concluir e enviar"}</Btn>
           </div>
         </>
       )}
@@ -1447,45 +1715,44 @@ function ExtNovaCad({ nav, toast, onCreate, acervo }) {
   );
 }
 
-function ExtMinhas({ nav, requests, user }) {
-  const mine = requests.filter(r => r.ownerEmail ? r.ownerEmail === user?.email : r.parceiro === (user?.name));
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-2xl font-bold" style={{ color: C.text }}>Minhas solicitações</h1>
-        <Btn icon={Plus} onClick={() => nav("nova-cad")}>Nova solicitação</Btn>
-      </div>
-      <Card><DataTable rows={mine} cols={["Número", "Empresa", "CNPJ", "Abertura", "Status", ""]} render={r => (
-        <>
-          <td className="px-4 py-3 font-mono font-semibold" style={{ color: C.coral }}>{r.id}</td>
-          <td className="px-4 py-3" style={{ color: C.text }}>{r.parceiro}</td>
-          <td className="px-4 py-3" style={{ color: C.muted }}>{r.cnpj}</td>
-          <td className="px-4 py-3" style={{ color: C.muted }}>{r.abertura}</td>
-          <td className="px-4 py-3"><Pill {...STATUS[r.status]} /></td>
-          <td className="px-4 py-3"><ChevronRight size={16} style={{ color: C.muted }} /></td>
-        </>
-      )} onRow={r => nav("detalhe", r.id)} /></Card>
-    </div>
-  );
-}
-
-function Perfil({ toast, user }) {
+/* Minha conta (equipe interna): troca da própria senha. */
+function MinhaConta({ toast, user }) {
   const initials = (user?.name || "?").split(" ").filter(Boolean).slice(0, 2).map(s => s[0]).join("").toUpperCase();
+  const [pw, setPw] = useState({ current: "", next: "", confirm: "" });
+  const [err, setErr] = useState("");
+  const [saving, setSaving] = useState(false);
+  const setP = (k) => (e) => setPw(s => ({ ...s, [k]: e.target.value }));
+  const salvar = async () => {
+    if (pw.next.length < 8) { setErr("A nova senha deve ter ao menos 8 caracteres."); return; }
+    if (pw.next !== pw.confirm) { setErr("As senhas não conferem."); return; }
+    setErr(""); setSaving(true);
+    const res = await db.changePassword(user?.email, pw.current, pw.next);
+    setSaving(false);
+    if (!res.ok) { setErr(res.reason === "invalid_current" ? "Senha atual incorreta." : res.reason === "weak_password" ? "Escolha uma senha mais forte." : "Não foi possível alterar a senha."); return; }
+    setPw({ current: "", next: "", confirm: "" });
+    toast("Senha alterada.");
+  };
   return (
     <div className="max-w-2xl">
-      <h1 className="text-2xl font-bold mb-4" style={{ color: C.text }}>Perfil</h1>
-      <Card className="p-5">
-        <div className="flex items-center gap-4 mb-5">
+      <h1 className="text-2xl font-bold mb-4" style={{ color: C.text }}>Minha conta</h1>
+      <Card className="p-5 mb-4">
+        <div className="flex items-center gap-4">
           <div className="w-16 h-16 rounded-full flex items-center justify-center text-xl font-bold" style={{ background: C.coralSoft, color: C.coral }}>{initials}</div>
-          <div><div className="font-bold text-lg" style={{ color: C.text }}>{user?.name}</div><div className="text-sm" style={{ color: C.muted }}>Fornecedor gocase{user?.cnpj ? ` · CNPJ ${user.cnpj}` : ""}</div></div>
+          <div>
+            <div className="font-bold text-lg" style={{ color: C.text }}>{user?.name}</div>
+            <div className="text-sm" style={{ color: C.muted }}>{user?.email} · {ROLE_LABEL[user?.role] || user?.role}</div>
+          </div>
         </div>
-        <div className="grid sm:grid-cols-2 gap-4 text-sm">
-          {[[Mail, "E-mail", user?.email || "—"], [Phone, "Telefone", user?.telefone || "—"], [UserIcon, "Contato", user?.contato || user?.name || "—"], [Smartphone, "CNPJ", user?.cnpj || "—"]].map(([Icon, k, v]) => (
-            <div key={k} className="flex items-start gap-2"><Icon size={16} style={{ color: C.coral }} className="mt-0.5" />
-              <div><div className="text-xs" style={{ color: C.muted }}>{k}</div><div className="font-medium" style={{ color: C.text }}>{v}</div></div></div>
-          ))}
+      </Card>
+      <Card className="p-5">
+        <h2 className="font-bold mb-3" style={{ color: C.text }}>Alterar senha</h2>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <Field label="Senha atual" value={pw.current} onChange={setP("current")} type="password" full />
+          <Field label="Nova senha (mín. 8 caracteres)" value={pw.next} onChange={setP("next")} type="password" />
+          <Field label="Confirmar nova senha" value={pw.confirm} onChange={setP("confirm")} type="password" />
         </div>
-        <div className="mt-5 flex gap-2"><Btn onClick={() => toast("Dados atualizados.")}>Salvar alterações</Btn><Btn variant="outline" onClick={() => toast("E-mail de redefinição enviado.")}>Redefinir senha</Btn></div>
+        {err && <div className="text-xs mt-3 font-semibold" style={{ color: C.danger }}>{err}</div>}
+        <div className="mt-4"><Btn icon={saving ? Loader2 : Save} onClick={salvar}>{saving ? "Salvando…" : "Salvar nova senha"}</Btn></div>
       </Card>
     </div>
   );
@@ -2053,12 +2320,13 @@ function Usuarios({ toast, users, currentUser, onAddUser, onUpdateUser, onDelete
   });
   const { paged: pagedUsers, more: moreUsers } = usePagedList(filtered, `${query}|${roleFilter}`);
 
-  const criar = () => {
+  const criar = async () => {
     if (!form.name || !form.email || !form.password) { setErr("Preencha nome, e-mail e senha."); return; }
-    if (form.password.length < 6) { setErr("A senha deve ter ao menos 6 caracteres."); return; }
+    if (form.password.length < 8) { setErr("A senha deve ter ao menos 8 caracteres."); return; }
     if (users.some(u => u.email.toLowerCase() === form.email.trim().toLowerCase())) { setErr("Já existe uma conta com este e-mail."); return; }
     setErr("");
-    onAddUser({ email: form.email.trim(), password: form.password, name: form.name, role: form.role, status: "Ativo" });
+    const res = await onAddUser({ email: form.email.trim(), password: form.password, name: form.name, role: form.role, status: "Ativo" });
+    if (res && !res.ok) { setErr(res.reason === "exists" ? "Já existe uma conta com este e-mail." : res.reason === "weak_password" ? "Escolha uma senha mais forte." : "Não foi possível criar a conta."); return; }
     toast(`Conta de ${ROLE_LABEL[form.role].toLowerCase()} criada para ${form.name}.`);
     setForm({ name: "", email: "", role: "COLABORADOR", password: "" });
     setShowForm(false);
@@ -2134,6 +2402,17 @@ function Usuarios({ toast, users, currentUser, onAddUser, onUpdateUser, onDelete
                       <button onClick={() => { const ns = u.status === "Ativo" ? "Inativo" : "Ativo"; onUpdateUser(u.email, { status: ns }); toast(`${u.name} agora está ${ns}.`); }}
                         className="text-xs font-semibold" style={{ color: u.status === "Ativo" ? C.coral : C.green }}>
                         {u.status === "Ativo" ? "Inativar" : "Ativar"}
+                      </button>
+                    )}
+                    {canManage && u.email !== currentUser?.email && (
+                      <button onClick={() => {
+                        const nova = window.prompt(`Nova senha para ${u.name} (mínimo 8 caracteres):`);
+                        if (nova == null) return;
+                        if (nova.length < 8) { toast("A senha deve ter ao menos 8 caracteres."); return; }
+                        onUpdateUser(u.email, { password: nova });
+                        toast(`Senha de ${u.name} redefinida.`);
+                      }} className="text-xs font-semibold" style={{ color: C.violet }}>
+                        Redefinir senha
                       </button>
                     )}
                     {isGestor && (
@@ -2564,18 +2843,17 @@ function AcervoDocs({ acervo, onAdd, onRemove, toast }) {
 }
 
 /* ===================== Root ===================== */
-// Sessão do usuário logado, persistida para sobreviver a F5 / reabertura da aba.
-const SESSION_KEY = "gocase_forn_session_v1";
-const _restoreSession = () => {
-  try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } catch (e) { return null; }
-};
-
+/* Dois acessos no mesmo app:
+   - Público (sem login): formulário de solicitação de cadastro + consulta de status.
+   - Equipe (login e senha validados no servidor): portal interno com dados,
+     dashboard e relatórios. A sessão é um cookie HttpOnly emitido pelo worker. */
 export default function App() {
-  const [users, setUsers] = useState(SEED_USERS);
-  const [currentUser, setCurrentUser] = useState(() => _restoreSession());
-  const [authView, setAuthView] = useState("login"); // login | signup
-  const [portal, setPortal] = useState(() => { const u = _restoreSession(); return u && isInterno(u.role) ? "interno" : "externo"; });
-  const [view, setView] = useState(() => { const u = _restoreSession(); return u && isInterno(u.role) ? "dash" : "inicio"; });
+  const [users, setUsers] = useState([]);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [publicView, setPublicView] = useState("form"); // form | status | login
+  const portal = "interno";
+  const [view, setView] = useState("dash");
   const [selId, setSelId] = useState(null);
   const [modal, setModal] = useState(null);
   const [notifOpen, setNotifOpen] = useState(false);
@@ -2583,7 +2861,7 @@ export default function App() {
   const [notifications, setNotifications] = useState([]);
   const [templates, setTemplates] = useState(DEFAULT_TEMPLATES);
   const [acervo, setAcervo] = useState(DEFAULT_ACERVO);
-  const [dataLoaded, setDataLoaded] = useState(false);
+  const [publicAcervo, setPublicAcervo] = useState([]);
   const [toastMsg, setToastMsg] = useState(null);
   // Tema: "light" | "dark" | "auto" (auto = escuro das 18h às 6h). Preferência persistida.
   const [themePref, setThemePref] = useState(() => { try { return localStorage.getItem("gocase_theme") || "dark"; } catch (e) { return "dark"; } });
@@ -2602,57 +2880,30 @@ export default function App() {
     try { localStorage.setItem("gocase_theme", next); } catch (e) { }
   };
 
-  // Hidrata TUDO do banco nativo do GoDeploy (env.DB) numa única chamada — ou do
-  // localStorage quando não há worker (dev/preview). Na primeira execução (base
-  // vazia) semeia contas, templates e acervo padrão diretamente no banco.
+  // Hidrata o portal interno (só depois do login — o servidor exige sessão da equipe).
+  // Na primeira execução (base vazia) semeia templates e acervo padrão.
+  const loadInternalData = async () => {
+    const data = await db.bootstrap();
+    if (!data) return false;
+    setUsers(Array.isArray(data.users) ? data.users : []);
+    if (Array.isArray(data.requests)) setRequests(data.requests.filter(r => r.tipo === "Cadastro"));
+    if (Array.isArray(data.notifications)) setNotifications(data.notifications);
+    if (data.templates && typeof data.templates === "object") setTemplates({ ...DEFAULT_TEMPLATES, ...data.templates });
+    else db.saveTemplates(DEFAULT_TEMPLATES);
+    if (Array.isArray(data.acervo) && data.acervo.length) setAcervo(data.acervo);
+    else { await Promise.all(DEFAULT_ACERVO.map(d => db.saveAcervoDoc(d))); setAcervo(DEFAULT_ACERVO); }
+    return true;
+  };
+
+  // Ao abrir: descobre se já há sessão válida da equipe; senão mostra o formulário público.
   useEffect(() => {
     let alive = true;
     (async () => {
-      const data = await db.bootstrap();
+      db.publicAcervo().then(a => { if (alive) setPublicAcervo(a); });
+      const u = await db.me();
       if (!alive) return;
-
-      let us = Array.isArray(data.users) ? data.users : [];
-      if (!us.length) {
-        await Promise.all(SEED_USERS.map(u => db.saveUser(u)));
-        us = SEED_USERS.map(stripPw);
-      }
-      setUsers(us);
-
-      // Esta plataforma só trata solicitações de Cadastro (trocas/garantias ficam no Service Desk).
-      if (Array.isArray(data.requests)) setRequests(data.requests.filter(r => r.tipo === "Cadastro"));
-      if (Array.isArray(data.notifications)) setNotifications(data.notifications);
-
-      if (data.templates && typeof data.templates === "object") {
-        setTemplates({ ...DEFAULT_TEMPLATES, ...data.templates });
-      } else {
-        db.saveTemplates(DEFAULT_TEMPLATES);
-      }
-
-      if (Array.isArray(data.acervo) && data.acervo.length) {
-        setAcervo(data.acervo);
-      } else {
-        await Promise.all(DEFAULT_ACERVO.map(d => db.saveAcervoDoc(d)));
-        setAcervo(DEFAULT_ACERVO);
-      }
-
-      setDataLoaded(true);
-
-      // Valida a sessão restaurada do localStorage contra a base atual de
-      // usuários: se a conta foi desativada ou removida, desloga; se os
-      // dados mudaram (ex: troca de role), atualiza a sessão.
-      setCurrentUser(cu => {
-        if (!cu) return cu;
-        const fresh = us.find(x => x.email === cu.email);
-        if (!fresh || (fresh.status && fresh.status !== "Ativo")) {
-          try { localStorage.removeItem(SESSION_KEY); } catch (e) { }
-          return null;
-        }
-        if (JSON.stringify(fresh) !== JSON.stringify(cu)) {
-          try { localStorage.setItem(SESSION_KEY, JSON.stringify(fresh)); } catch (e) { }
-          return fresh;
-        }
-        return cu;
-      });
+      if (u) { setCurrentUser(u); await loadInternalData(); }
+      if (alive) setAuthChecked(true);
     })();
     return () => { alive = false; };
   }, []);
@@ -2662,7 +2913,11 @@ export default function App() {
   const addAcervoDoc = (doc) => { setAcervo(a => [...a, doc]); db.saveAcervoDoc(doc); };
   const removeAcervoDoc = (id) => { setAcervo(a => a.filter(d => d.id !== id)); db.removeAcervoDoc(id); };
 
-  const addUser = (u) => { setUsers(list => [...list.filter(x => x.email !== u.email), stripPw(u)]); db.saveUser(u); };
+  const addUser = async (u) => {
+    const res = await db.saveUser(u);
+    if (res.ok) setUsers(list => [...list.filter(x => x.email !== u.email), res.user]);
+    return res;
+  };
   const updateUser = (email, changes) => {
     setUsers(list => list.map(x => x.email === email ? { ...x, ...stripPw(changes) } : x));
     db.updateUser(email, changes);
@@ -2673,25 +2928,15 @@ export default function App() {
   const nav = (v, id = null) => { setView(v); if (id) setSelId(id); setNotifOpen(false); };
   const selected = requests.find(r => r.id === selId);
 
-  const onLogin = (u) => {
+  const onLogin = async (u) => {
     setCurrentUser(u);
-    try { localStorage.setItem(SESSION_KEY, JSON.stringify(u)); } catch (e) { }
-    const p = isInterno(u.role) ? "interno" : "externo";
-    setPortal(p); setView(p === "externo" ? "inicio" : "dash");
+    setView("dash");
+    await loadInternalData();
   };
-  const onRegister = async (newUser) => {
-    const res = await db.signup(newUser);
-    if (!res.ok) return res; // Signup mostra o erro na tela
-    setUsers(list => [...list.filter(x => x.email !== res.user.email), res.user]);
-    onLogin(res.user);
-    toast("Conta criada! Bem-vindo(a) ao portal do fornecedor.");
-    return res;
-  };
-  const logout = () => { setCurrentUser(null); setAuthView("login"); setView("inicio"); try { localStorage.removeItem(SESSION_KEY); } catch (e) { } };
-  // Troca de portal só liberada para a equipe interna (admin/gestor/colaborador)
-  const switchPortal = (p) => {
-    if (p === "interno" && !isInterno(currentUser?.role)) { toast("Acesso ao portal interno restrito à equipe gocase."); return; }
-    setPortal(p); setView(p === "externo" ? "inicio" : "dash");
+  const logout = async () => {
+    await db.logout();
+    setCurrentUser(null); setPublicView("form"); setView("dash");
+    setRequests([]); setNotifications([]); setUsers([]);
   };
 
   const pushNotif = (n) => {
@@ -2726,7 +2971,7 @@ export default function App() {
         ultimaAtualiz: nowStr,
         ultimaAtualizTs: now,
         ...(isFinal ? { finalizadoTs: now } : {}),
-        resp: portal === "interno" && req.resp === "—" ? (currentUser?.name || "Equipe gocase") : req.resp,
+        resp: req.resp === "—" ? (currentUser?.name || "Equipe gocase") : req.resp,
         movimentos: [...(req.movimentos || []), mover],
       };
       setRequests(rs => rs.map(r => r.id === selId ? updated : r));
@@ -2738,46 +2983,17 @@ export default function App() {
 
     if (req) {
       const cor = STATUS[status]?.color || C.muted;
-      // Mensagem ao cliente: para setorial, texto específico
       const msgCliente = isSetorial
         ? `Sua solicitação ${req.id} foi encaminhada ao ${SETOR_LABEL[status]} para análise. Em breve você receberá um retorno.`
         : `Sua solicitação ${req.id} foi atualizada para "${STATUS[status]?.label || status}".`;
-      pushNotif({ message: msgCliente, requestId: req.id, color: cor, audience: "externo", forUser: req.parceiro, forUserEmail: req.ownerEmail });
+      // E-mail ao fornecedor (efetivo quando NOTIFY_API estiver configurado)
       const corpo = renderTemplate(templates[status], { id: req.id, cliente: req.parceiro, status: STATUS[status]?.label || status }) || msgCliente;
       notifyEmail({ to: req.email, clientName: req.parceiro, requestId: req.id, status: STATUS[status]?.label || status, message: corpo });
-      // Notificação interna
       const msgInterna = isSetorial
         ? `${req.id} submetida ao ${SETOR_LABEL[status]} por ${currentUser?.name || "Equipe gocase"}.`
         : `${req.id} atualizada para "${STATUS[status]?.label}" por ${currentUser?.name || "Equipe gocase"}.`;
       pushNotif({ message: msgInterna, requestId: req.id, color: cor, audience: "interno" });
     }
-  };
-
-  const fmtBR = (d) => `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
-  const createRequest = (payload) => {
-    const prefix = "CAD";
-    const nums = requests.filter(r => r.id.startsWith(prefix)).map(r => parseInt(r.id.split("-")[2], 10)).filter(n => !isNaN(n));
-    const next = (nums.length ? Math.max(...nums) : 0) + 1;
-    const today = new Date();
-    const prazoDate = new Date(today); prazoDate.setDate(prazoDate.getDate() + 7);
-    const req = {
-      id: `${prefix}-${today.getFullYear()}-${String(next).padStart(6, "0")}`,
-      abertura: fmtBR(today), aberturaTs: today.getTime(), prazo: fmtBR(prazoDate), sla: "DENTRO", ownerEmail: currentUser?.email || payload.email || "", ...payload,
-    };
-    setRequests(rs => [req, ...rs]);
-    db.saveRequest(req);
-    // Notifica a equipe interna sobre o novo envio
-    pushNotif({ message: `Nova solicitação de cadastro recebida (${req.id}) de ${req.parceiro}.`, requestId: req.id, color: C.cyan, audience: "interno" });
-    // Notifica o fornecedor sobre o status inicial
-    const msgCliente = `Sua solicitação ${req.id} foi recebida e está ${STATUS[req.status].label.toLowerCase()}.`;
-    pushNotif({ message: msgCliente, requestId: req.id, color: STATUS[req.status].color, audience: "externo", forUser: req.parceiro, forUserEmail: req.ownerEmail });
-    // Aviso de documentos enviados automaticamente pelo sistema (cadastro)
-    if (Array.isArray(req.docsEnviados) && req.docsEnviados.length) {
-      pushNotif({ message: `Documentos enviados na sua solicitação ${req.id}: ${req.docsEnviados.map(d => d.nome).join(", ")}.`, requestId: req.id, color: C.green, audience: "externo", forUser: req.parceiro, forUserEmail: req.ownerEmail });
-    }
-    // E-mail automático ao cliente (modelo do status, se houver) — efetivo quando o backend estiver configurado
-    const corpo = renderTemplate(templates[req.status], { id: req.id, cliente: req.parceiro, status: STATUS[req.status].label }) || msgCliente;
-    notifyEmail({ to: req.email, clientName: req.parceiro, requestId: req.id, status: STATUS[req.status].label, message: corpo });
   };
 
   const Fonts = () => <style>{`
@@ -2794,11 +3010,34 @@ export default function App() {
     [data-theme="dark"] select option{color:#1E1E29;background:#fff}
   `}</style>;
 
+  const Toast = () => toastMsg && (
+    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-lg flex items-center gap-2" style={{ background: C.ink }}>
+      <CheckCircle2 size={16} style={{ color: C.green }} /> {toastMsg}
+    </div>
+  );
+
+  if (!authChecked) return (
+    <><Fonts />
+      <div className="min-h-screen flex items-center justify-center gap-2" style={{ background: C.bg }}>
+        <Loader2 className="animate-spin" size={20} style={{ color: C.coral }} />
+        <span className="text-sm" style={{ color: C.muted }}>Carregando…</span>
+      </div>
+    </>
+  );
+
+  // Acesso aberto: qualquer pessoa solicita cadastro (só o CNPJ é obrigatório).
   if (!currentUser) return (
     <><Fonts />
-      {authView === "login"
-        ? <Login users={users} onLogin={onLogin} goSignup={() => setAuthView("signup")} />
-        : <Signup users={users} onRegister={onRegister} goLogin={() => setAuthView("login")} />}
+      {publicView === "login"
+        ? <Login onLogin={onLogin} goBack={() => setPublicView("form")} />
+        : (
+          <PublicShell view={publicView} setView={setPublicView} themePref={themePref} onCycleTheme={cycleTheme}>
+            {publicView === "status"
+              ? <ConsultaStatus />
+              : <ExtNovaCad toast={toast} acervo={publicAcervo} goStatus={() => setPublicView("status")} />}
+          </PublicShell>
+        )}
+      <Toast />
     </>
   );
 
@@ -2809,34 +3048,18 @@ export default function App() {
       const updated = { ...req, chat: [...(req.chat || []), msg], ultimaAtualiz: new Date().toLocaleString("pt-BR"), ultimaAtualizTs: msg.ts };
       setRequests(rs => rs.map(r => r.id === reqId ? updated : r));
       db.saveRequest(updated);
-      const isFromInternal = isInterno(currentUser?.role);
-      pushNotif({ message: `Nova mensagem no chamado ${reqId}: "${(msg.texto || "").slice(0, 60)}…"`, requestId: reqId, color: C.cyan, audience: isFromInternal ? "externo" : "interno", forUser: req.parceiro });
+      pushNotif({ message: `Nova anotação no chamado ${reqId}: "${(msg.texto || "").slice(0, 60)}…"`, requestId: reqId, color: C.cyan, audience: "interno" });
     }
   };
-  const reopenRequest = (reqId, triggerMsg) => {
-    const req = requests.find(r => r.id === reqId);
-    if (req) {
-      const updated = { ...req, status: "EM_ANALISE", ultimaAtualiz: new Date().toLocaleString("pt-BR"), ultimaAtualizTs: triggerMsg.ts, movimentos: [...(req.movimentos || []), { status: "EM_ANALISE", actor: "cliente", who: req.parceiro, ts: triggerMsg.ts, text: `Chamado reaberto automaticamente por nova mensagem do cliente.` }] };
-      setRequests(rs => rs.map(r => r.id === reqId ? updated : r));
-      db.saveRequest(updated);
-      pushNotif({ message: `Chamado ${reqId} REABERTO automaticamente por nova mensagem do cliente.`, requestId: reqId, color: C.yellow, audience: "interno" });
-      pushNotif({ message: `Seu chamado ${reqId} foi reaberto. Retornaremos em breve.`, requestId: reqId, color: C.cyan, audience: "externo", forUser: req.parceiro });
-    }
-    toast(`Chamado ${reqId} reaberto automaticamente.`);
-  };
+  const reopenRequest = () => { };
 
-  if (view === "detalhe") screen = <Detalhe r={selected} back={() => nav(portal === "externo" ? "minhas" : "lista-cad")} interno={portal === "interno"} openModal={setModal} currentUser={currentUser} onSendMsg={sendChatMsg} onReopenRequest={reopenRequest} />;
-  else if (view === "cliente" && portal === "interno") screen = <ClienteDetalhe nome={selId} requests={requests} users={users} nav={nav} />;
-  else if (portal === "externo") {
-    screen = { inicio: <ExtInicio nav={nav} requests={requests} user={currentUser} />, "nova-cad": <ExtNovaCad nav={nav} toast={toast} onCreate={createRequest} acervo={acervo} />, minhas: <ExtMinhas nav={nav} requests={requests} user={currentUser} />, perfil: <Perfil toast={toast} user={currentUser} /> }[view];
-  } else {
-    screen = { dash: <IntDash nav={nav} requests={requests} />, "lista-cad": <IntLista nav={nav} requests={requests} tipo="Cadastro" titulo="Solicitações de Cadastro" />, clientes: <Clientes requests={requests} users={users} nav={nav} />, acervo: (["ADMIN", "GESTOR"].includes(currentUser?.role) ? <AcervoDocs acervo={acervo} onAdd={addAcervoDoc} onRemove={removeAcervoDoc} toast={toast} /> : <IntDash nav={nav} requests={requests} />), usuarios: <Usuarios toast={toast} users={users} currentUser={currentUser} onAddUser={addUser} onUpdateUser={updateUser} onDeleteUser={removeUser} />, relatorios: <Relatorios toast={toast} requests={requests} />, config: <Config toast={toast} templates={templates} onSaveTemplates={saveTemplates} /> }[view];
+  if (view === "detalhe") screen = <Detalhe r={selected} back={() => nav("lista-cad")} interno openModal={setModal} currentUser={currentUser} onSendMsg={sendChatMsg} onReopenRequest={reopenRequest} />;
+  else if (view === "cliente") screen = <ClienteDetalhe nome={selId} requests={requests} users={users} nav={nav} />;
+  else {
+    screen = { dash: <IntDash nav={nav} requests={requests} />, "lista-cad": <IntLista nav={nav} requests={requests} tipo="Cadastro" titulo="Solicitações de Cadastro" />, clientes: <Clientes requests={requests} users={users} nav={nav} />, acervo: (["ADMIN", "GESTOR"].includes(currentUser?.role) ? <AcervoDocs acervo={acervo} onAdd={addAcervoDoc} onRemove={removeAcervoDoc} toast={toast} /> : <IntDash nav={nav} requests={requests} />), usuarios: <Usuarios toast={toast} users={users} currentUser={currentUser} onAddUser={addUser} onUpdateUser={updateUser} onDeleteUser={removeUser} />, relatorios: <Relatorios toast={toast} requests={requests} />, config: <Config toast={toast} templates={templates} onSaveTemplates={saveTemplates} />, conta: <MinhaConta toast={toast} user={currentUser} /> }[view];
   }
 
-  const visibleNotifs = notifications.filter(n =>
-    portal === "interno" ? n.audience === "interno"
-      : (n.audience === "externo" && (n.forUserEmail ? n.forUserEmail === currentUser?.email : (!n.forUser || n.forUser === currentUser?.name)))
-  );
+  const visibleNotifs = notifications.filter(n => n.audience === "interno");
   const badge = visibleNotifs.filter(n => !n.read).length;
   const openNotifs = () => {
     const ids = visibleNotifs.filter(n => !n.read).map(n => n.id);
@@ -2849,16 +3072,12 @@ export default function App() {
   return (
     <>
       <Fonts />
-      <Shell portal={portal} switchPortal={switchPortal} view={view} nav={nav} onLogout={logout} notifOpen={notifOpen} setNotifOpen={setNotifOpen} user={currentUser} notifs={visibleNotifs} badge={badge} onOpenNotifs={openNotifs} themePref={themePref} onCycleTheme={cycleTheme} requests={requests}>
+      <Shell portal={portal} view={view} nav={nav} onLogout={logout} notifOpen={notifOpen} setNotifOpen={setNotifOpen} user={currentUser} notifs={visibleNotifs} badge={badge} onOpenNotifs={openNotifs} themePref={themePref} onCycleTheme={cycleTheme} requests={requests}>
         {screen}
       </Shell>
       {modal && <Modal kind={modal} onConfirm={confirmModal} onClose={() => setModal(null)} />}
       <DocViewer />
-      {toastMsg && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-lg flex items-center gap-2" style={{ background: C.ink }}>
-          <CheckCircle2 size={16} style={{ color: C.green }} /> {toastMsg}
-        </div>
-      )}
+      <Toast />
     </>
   );
 }

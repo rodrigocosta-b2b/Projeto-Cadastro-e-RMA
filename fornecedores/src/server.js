@@ -1,81 +1,112 @@
 /*
  * Backend do gocase Cadastro de Fornecedores — worker GoDeploy sobre o banco nativo
- * (env.DB, SQLite). Mesma API do Service Desk (src/server.js), mas é um app GoDeploy
- * separado, com banco próprio: aqui só entram solicitações de Cadastro.
+ * (env.DB, SQLite). App GoDeploy separado do Service Desk, com banco próprio: aqui só
+ * entram solicitações de Cadastro.
  *
- * TODO registro do sistema é persistido aqui: contas, solicitações, notificações,
- * templates, acervo e arquivos (imagens/vídeos/PDFs). Cada entidade é UMA LINHA
- * própria (não um array gigante), então gravações concorrentes não se sobrescrevem
- * e nada se perde ao recarregar a página ou trocar de aba.
+ * O app é PÚBLICO no GoDeploy (qualquer pessoa abre o formulário de cadastro), então
+ * a separação de acesso é feita AQUI, no servidor:
+ *   - Rotas /api/public/* → abertas: enviar solicitação (só o CNPJ é obrigatório),
+ *     anexar arquivos e consultar o status pelo protocolo + CNPJ. Nunca devolvem
+ *     dados de outras solicitações, contas ou links do acervo.
+ *   - Todo o resto (dados, dashboard, relatórios, usuários, arquivos) exige sessão
+ *     de equipe (ADMIN/GESTOR/COLABORADOR): login + senha → cookie HttpOnly
+ *     `gcf_session` (também aceito como `Authorization: Bearer`).
+ *
+ * Senhas: hash PBKDF2-SHA256. A senha padrão antiga (que está no repositório público)
+ * é recusada no login e, se alguma conta ainda a usa, é trocada pela senha do segredo
+ * SEED_ADMIN_PASSWORD (setAppSecret). Sem esse segredo, essas contas ficam sem login.
  *
  * O gateway do GoDeploy serve os assets estáticos ANTES de chamar o worker, então
  * aqui tratamos apenas as rotas /api/*.
  *
- * API
+ * API pública
  *   GET    /api/health
- *   GET    /api/bootstrap                       → tudo que a SPA precisa para hidratar
- *   POST   /api/login        {email,password}   → { user } | 401 | 403 (inativo)
- *   POST   /api/signup       {user}             → { user } | 409 (já existe)
- *   GET    /api/users                           → [user sem senha]
- *   POST   /api/users        {user}             → upsert de conta (semear/criar)
- *   PATCH  /api/users/:email {changes}          → atualiza conta
- *   DELETE /api/users/:email                    → remove conta
- *   PUT    /api/requests/:id {request}          → upsert de solicitação
- *   POST   /api/notifications {notif}           → cria notificação
- *   POST   /api/notifications/read {ids:[]}      → marca como lidas
- *   PUT    /api/templates    {templates}        → salva modelos de e-mail
- *   GET    /api/acervo                          → [doc]
- *   PUT    /api/acervo/:id   {doc}              → upsert de documento do acervo
- *   DELETE /api/acervo/:id                      → remove do acervo
- *   POST   /api/files        {name,type,size,data(base64)} → { id, url, ... }
- *   GET    /api/files/:id[?download=1]          → bytes do arquivo (inline)
+ *   GET    /api/public/acervo                   → [{ id, nome, descricao }] (sem links)
+ *   POST   /api/public/files  {name,type,size,data(base64)} → { id, name, type, size, url }
+ *   POST   /api/public/cadastro {cnpj, dados…}  → { id, abertura, prazo }
+ *   GET    /api/public/status?id=&cnpj=         → { id, status, abertura, prazo, ultimaAtualiz }
+ *   POST   /api/login        {email,password}   → { user, token } + cookie | 401 | 403 | 429
+ *   POST   /api/logout
+ *   GET    /api/me                              → { user } | 401
+ *
+ * API da equipe (sessão obrigatória)
+ *   POST   /api/me/password  {current,next}     → troca a própria senha
+ *   GET    /api/bootstrap                       → tudo que o portal interno precisa
+ *   GET    /api/users | POST /api/users | PATCH/DELETE /api/users/:email  (mutação: ADMIN/GESTOR)
+ *   PUT    /api/requests/:id {request}
+ *   POST   /api/notifications | POST /api/notifications/read {ids:[]}
+ *   PUT    /api/templates
+ *   GET    /api/acervo | PUT/DELETE /api/acervo/:id  (mutação: ADMIN/GESTOR)
+ *   POST   /api/files | GET /api/files/:id[?download=1]
+ *   GET    /api/reseller-lookup?cnpj=           → base de clientes gocase (Datamart)
  */
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const CHUNK = 700000; // base64 por linha (limite de linha do SQLite é 2 MB)
+const SESSION_COOKIE = "gcf_session";
+const SESSION_TTL_MS = 12 * 3600 * 1000;
+const STAFF = ["ADMIN", "GESTOR", "COLABORADOR"];
+const MANAGERS = ["ADMIN", "GESTOR"];
+// Senhas que já foram publicadas (código aberto) — nunca aceitas.
+const BLOCKED_PASSWORDS = ["123456QAZ"];
+const SEED_ADMINS = [
+  { email: "beatriz.nogueira@gocase.com", name: "Beatriz Nogueira", role: "ADMIN" },
+  { email: "rodrigo.costa@gocase.com", name: "Rodrigo Costa", role: "ADMIN" },
+  { email: "larissa.simoes@gocase.com", name: "Larissa Simões", role: "ADMIN" },
+];
+const PUBLIC_FILE_TYPES = ["image/jpeg", "image/png", "image/webp", "video/mp4", "video/quicktime", "application/pdf"];
+const PUBLIC_FILE_MAX = 10 * 1024 * 1024; // 10 MB por arquivo
+const LOGIN_MAX_FAILS = 8;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 
-const json = (obj, status = 200) =>
-  new Response(JSON.stringify(obj), { status, headers: JSON_HEADERS });
+const json = (obj, status = 200, headers = {}) =>
+  new Response(JSON.stringify(obj), { status, headers: { ...JSON_HEADERS, ...headers } });
 
 /* ---------------------------------- schema --------------------------------- */
 let schemaReady = null;
 function ensureSchema(env) {
   if (!schemaReady) {
     schemaReady = (async () => {
-      await env.DB.exec(
+      const ddl = [
         "CREATE TABLE IF NOT EXISTS users (email TEXT PRIMARY KEY, password TEXT, name TEXT, role TEXT, status TEXT, cnpj TEXT, telefone TEXT, contato TEXT, created_at TEXT DEFAULT (datetime('now')))",
-        [],
-      );
-      await env.DB.exec(
         "CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, owner_email TEXT, status TEXT, tipo TEXT, updated_ts INTEGER, payload TEXT NOT NULL)",
-        [],
-      );
-      await env.DB.exec(
         "CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, audience TEXT, for_user_email TEXT, read INTEGER DEFAULT 0, ts INTEGER, payload TEXT NOT NULL)",
-        [],
-      );
-      await env.DB.exec(
         "CREATE TABLE IF NOT EXISTS acervo (id TEXT PRIMARY KEY, payload TEXT NOT NULL)",
-        [],
-      );
-      await env.DB.exec(
         "CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)",
-        [],
-      );
-      await env.DB.exec(
         "CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, name TEXT, type TEXT, size INTEGER, created_at TEXT DEFAULT (datetime('now')))",
-        [],
-      );
-      await env.DB.exec(
         "CREATE TABLE IF NOT EXISTS file_chunks (file_id TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (file_id, seq))",
-        [],
-      );
+        "CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, email TEXT NOT NULL, expires_ts INTEGER NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS login_attempts (email TEXT PRIMARY KEY, fails INTEGER NOT NULL, first_ts INTEGER NOT NULL)",
+      ];
+      for (const sql of ddl) await env.DB.exec(sql, []);
+      await secureAccounts(env);
     })().catch((e) => {
       schemaReady = null;
       throw e;
     });
   }
   return schemaReady;
+}
+
+/* Garante que nenhuma conta use senha publicada e semeia os admins num banco vazio.
+ * A nova senha vem do segredo SEED_ADMIN_PASSWORD; sem ele, a conta fica sem senha
+ * (login bloqueado) até um gestor definir outra. */
+async function secureAccounts(env) {
+  const seedPw = env.SEED_ADMIN_PASSWORD && !BLOCKED_PASSWORDS.includes(env.SEED_ADMIN_PASSWORD)
+    ? env.SEED_ADMIN_PASSWORD : "";
+  const r = await env.DB.query("SELECT email, password, role FROM users", []);
+  const rows = r.rows || [];
+  for (const u of rows) {
+    let blocked = false;
+    for (const bad of BLOCKED_PASSWORDS) if (await verifyPassword(bad, u.password)) blocked = true;
+    if (blocked) {
+      await env.DB.exec("UPDATE users SET password = ? WHERE email = ?", [seedPw ? await hashPassword(seedPw) : "", u.email]);
+      await env.DB.exec("DELETE FROM sessions WHERE email = ?", [u.email]);
+    }
+  }
+  if (!rows.some((u) => STAFF.includes(u.role)) && seedPw) {
+    for (const a of SEED_ADMINS) await upsertUser(env, { ...a, password: seedPw, status: "Ativo" });
+  }
 }
 
 /* --------------------------------- helpers --------------------------------- */
@@ -88,16 +119,42 @@ const parse = (s, def = null) => {
     return def;
   }
 };
+const str = (v, max = 300) => String(v == null ? "" : v).trim().slice(0, max);
+const onlyDigits = (s) => String(s || "").replace(/\D/g, "");
+function cnpjValido(d) {
+  if (d.length !== 14 || /^(\d)\1+$/.test(d)) return false;
+  const dv = (n) => {
+    let soma = 0, peso = n - 7;
+    for (let i = 0; i < n; i++) { soma += Number(d[i]) * peso--; if (peso < 2) peso = 9; }
+    const r = soma % 11;
+    return r < 2 ? 0 : 11 - r;
+  };
+  return dv(12) === Number(d[12]) && dv(13) === Number(d[13]);
+}
+const fmtCnpj = (d) => `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12, 14)}`;
+// Datas no fuso de Brasília (o worker roda em UTC).
+const fmtBR = (ts) => new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(ts));
+const fmtBRFull = (ts) => new Date(ts).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
+
+function randomToken(bytes = 32) {
+  const b = crypto.getRandomValues(new Uint8Array(bytes));
+  return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+}
+function readCookie(request, name) {
+  const raw = request.headers.get("Cookie") || "";
+  for (const part of raw.split(";")) {
+    const [k, ...v] = part.trim().split("=");
+    if (k === name) return v.join("=");
+  }
+  return "";
+}
+const sessionCookie = (token, maxAgeS) =>
+  `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAgeS}`;
 
 /* ----------------------------------- senha ---------------------------------- *
- * Hash de senha via PBKDF2-SHA256 (Web Crypto — crypto.subtle), disponível
- * nativamente no runtime do worker, sem depender de pacote externo. Formato
- * armazenado: pbkdf2$<iterações>$<salt em base64>$<hash em base64>.
- *
- * Compatibilidade com contas antigas: enquanto a coluna `password` ainda guardar
- * texto puro (contas criadas antes desta mudança), o login aceita a senha em
- * texto puro e, no primeiro login bem-sucedido, migra silenciosamente a senha
- * armazenada para o formato com hash. */
+ * Hash de senha via PBKDF2-SHA256 (Web Crypto — crypto.subtle). Formato armazenado:
+ * pbkdf2$<iterações>$<salt em base64>$<hash em base64>. Contas legadas em texto puro
+ * são migradas para hash no primeiro login bem-sucedido. */
 const PBKDF2_ITERATIONS = 100000;
 
 function bufToB64(buf) {
@@ -135,7 +192,7 @@ function isHashed(stored) {
   return typeof stored === "string" && stored.startsWith("pbkdf2$");
 }
 async function verifyPassword(password, stored) {
-  if (!stored) return false;
+  if (!stored || !password) return false;
   if (isHashed(stored)) {
     const [, iterStr, saltB64, hashB64] = stored.split("$");
     const iterations = parseInt(iterStr, 10) || PBKDF2_ITERATIONS;
@@ -149,7 +206,12 @@ async function hashIfNeeded(password) {
   if (!password || isHashed(password)) return password || "";
   return hashPassword(password);
 }
+// Regra mínima para senhas novas definidas pela equipe.
+function senhaFraca(pw) {
+  return !pw || String(pw).length < 8 || BLOCKED_PASSWORDS.includes(pw);
+}
 
+/* --------------------------------- contas ---------------------------------- */
 async function getUser(env, email) {
   const r = await env.DB.query("SELECT * FROM users WHERE email = ?", [lower(email)]);
   return r.rows && r.rows[0] ? r.rows[0] : null;
@@ -170,7 +232,7 @@ async function upsertUser(env, u) {
       email,
       password,
       u.name || "",
-      u.role || "CLIENTE",
+      u.role || "COLABORADOR",
       u.status || "Ativo",
       u.cnpj || "",
       u.telefone || "",
@@ -185,6 +247,48 @@ async function listUsers(env) {
   return (r.rows || []).map(stripPw);
 }
 
+/* -------------------------------- sessões ---------------------------------- */
+async function createSession(env, email) {
+  const token = randomToken();
+  const now = Date.now();
+  await env.DB.exec("DELETE FROM sessions WHERE expires_ts < ?", [now]);
+  await env.DB.exec("INSERT INTO sessions (token, email, expires_ts) VALUES (?, ?, ?)", [token, lower(email), now + SESSION_TTL_MS]);
+  return token;
+}
+function sessionToken(request) {
+  const auth = request.headers.get("Authorization") || "";
+  if (auth.startsWith("Bearer ")) return auth.slice(7).trim();
+  return readCookie(request, SESSION_COOKIE);
+}
+// Usuário da equipe dono da sessão (ativo e com papel interno) — ou null.
+async function staffUser(request, env) {
+  const token = sessionToken(request);
+  if (!token || !/^[0-9a-f]{64}$/.test(token)) return null;
+  const r = await env.DB.query("SELECT email, expires_ts FROM sessions WHERE token = ?", [token]);
+  const s = r.rows && r.rows[0];
+  if (!s || s.expires_ts < Date.now()) return null;
+  const u = await getUser(env, s.email);
+  if (!u || !STAFF.includes(u.role) || (u.status && u.status !== "Ativo")) return null;
+  return { ...stripPw(u), token };
+}
+
+async function loginThrottled(env, email) {
+  const r = await env.DB.query("SELECT fails, first_ts FROM login_attempts WHERE email = ?", [email]);
+  const a = r.rows && r.rows[0];
+  return !!a && Date.now() - a.first_ts < LOGIN_WINDOW_MS && a.fails >= LOGIN_MAX_FAILS;
+}
+async function loginFailed(env, email) {
+  const now = Date.now();
+  const r = await env.DB.query("SELECT fails, first_ts FROM login_attempts WHERE email = ?", [email]);
+  const a = r.rows && r.rows[0];
+  if (!a || now - a.first_ts >= LOGIN_WINDOW_MS) {
+    await env.DB.exec("INSERT INTO login_attempts (email, fails, first_ts) VALUES (?, 1, ?) ON CONFLICT(email) DO UPDATE SET fails = 1, first_ts = excluded.first_ts", [email, now]);
+  } else {
+    await env.DB.exec("UPDATE login_attempts SET fails = fails + 1 WHERE email = ?", [email]);
+  }
+}
+
+/* -------------------------------- listagens -------------------------------- */
 async function listRequests(env) {
   const r = await env.DB.query(
     "SELECT payload FROM requests ORDER BY updated_ts DESC",
@@ -217,16 +321,25 @@ async function getTemplates(env) {
   return r.rows && r.rows[0] ? parse(r.rows[0].v) : null;
 }
 
+async function saveNotification(env, n) {
+  await env.DB.exec(
+    `INSERT INTO notifications (id, audience, for_user_email, read, ts, payload)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET read = excluded.read, payload = excluded.payload`,
+    [n.id, n.audience || "", lower(n.forUserEmail || ""), n.read ? 1 : 0, n.ts || Date.now(), JSON.stringify(n)],
+  );
+}
+
 /* ---------------------------------- files ---------------------------------- */
 function randId() {
-  return "f" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  return "f" + Date.now().toString(36) + randomToken(6);
 }
 async function fileInsert(env, { name, type, size, data }) {
   const id = randId();
   await env.DB.exec("INSERT INTO files (id, name, type, size) VALUES (?, ?, ?, ?)", [
     id,
-    name || "arquivo",
-    type || "",
+    str(name, 200) || "arquivo",
+    str(type, 100),
     Number(size) || 0,
   ]);
   let seq = 0;
@@ -259,9 +372,114 @@ async function fileResponse(env, id, download) {
       "content-type": meta.rows[0].type || "application/octet-stream",
       "content-disposition": `${download ? "attachment" : "inline"}; filename="${name}"`,
       "content-length": String(bytes.length),
-      "cache-control": "public, max-age=31536000, immutable",
+      "cache-control": "private, max-age=3600",
     },
   });
+}
+function fileRefResponse(id, body) {
+  return json({ id, name: body.name || "arquivo", type: body.type || "", size: Number(body.size) || 0, url: `/api/files/${id}` });
+}
+
+/* --------------------------- solicitação pública ---------------------------- */
+async function nextCadastroId(env, year) {
+  const r = await env.DB.query("SELECT id FROM requests WHERE id LIKE ?", [`CAD-${year}-%`]);
+  const nums = (r.rows || []).map((x) => parseInt(String(x.id).split("-")[2], 10)).filter((n) => !isNaN(n));
+  return (nums.length ? Math.max(...nums) : 0) + 1;
+}
+
+async function createCadastro(env, body) {
+  const digits = onlyDigits(body.cnpj);
+  if (!cnpjValido(digits)) return json({ error: "invalid_cnpj" }, 400);
+  const d = body.dados || {};
+  const dados = {};
+  for (const k of ["razaoSocial", "nomeFantasia", "inscricaoEstadual", "situacao", "nomeContato", "telefone", "email", "cep", "logradouro", "bairro", "municipio", "estado", "complemento", "fonte"]) dados[k] = str(d[k]);
+  dados.estado = dados.estado.toUpperCase().slice(0, 2);
+  const mensagem = str(body.mensagem, 4000);
+  const anexos = (Array.isArray(body.anexos) ? body.anexos : []).slice(0, 20)
+    .filter((a) => a && /^\/api\/files\/f[0-9a-z]+$/.test(String(a.url || "")))
+    .map((a) => ({ id: str(a.id, 60), name: str(a.name, 200), type: str(a.type, 100), size: Number(a.size) || 0, url: a.url }));
+  const wanted = new Set((Array.isArray(body.docsSolicitados) ? body.docsSolicitados : []).map(String));
+  const docs = (await listAcervo(env)).filter((doc) => wanted.has(String(doc.id)));
+
+  const now = Date.now();
+  const year = fmtBR(now).slice(-4);
+  for (let tentativa = 0; tentativa < 5; tentativa++) {
+    const id = `CAD-${year}-${String((await nextCadastroId(env, year)) + tentativa).padStart(6, "0")}`;
+    const req = {
+      id, tipo: "Cadastro", status: "NOVA", resp: "—", sla: "DENTRO", origem: "publico",
+      abertura: fmtBR(now), aberturaTs: now, prazo: fmtBR(now + 7 * 86400000),
+      ultimaAtualiz: fmtBRFull(now), ultimaAtualizTs: now,
+      parceiro: dados.nomeFantasia || dados.razaoSocial || `CNPJ ${fmtCnpj(digits)}`,
+      cnpj: fmtCnpj(digits), uf: dados.estado || "—", email: dados.email, ie: dados.inscricaoEstadual,
+      ownerEmail: lower(dados.email),
+      dados,
+      produto: "—", modelo: "—", nf: "—", venda: "—",
+      problema: mensagem || "Solicitação de cadastro / homologação de parceiro.",
+      mensagemCadastro: mensagem,
+      anexos,
+      docsSolicitados: docs.map((doc) => doc.nome),
+      // Links do acervo ficam só para a equipe, que os envia ao fornecedor após a análise.
+      docsEnviados: docs.map((doc) => ({ nome: doc.nome, url: doc.url || "", tipo: doc.tipo || "link", arquivoType: doc.arquivoType || "" })),
+    };
+    try {
+      await env.DB.exec(
+        "INSERT INTO requests (id, owner_email, status, tipo, updated_ts, payload) VALUES (?, ?, ?, ?, ?, ?)",
+        [id, req.ownerEmail, req.status, req.tipo, now, JSON.stringify(req)],
+      );
+    } catch (e) {
+      if (/UNIQUE|constraint/i.test(String(e))) continue; // outro envio levou o mesmo número
+      throw e;
+    }
+    await saveNotification(env, {
+      id: `n-${now}-${randomToken(3)}`, ts: now, read: false, audience: "interno", requestId: id, color: "#00B8D9",
+      message: `Nova solicitação de cadastro recebida (${id}) de ${req.parceiro}.`,
+    });
+    return json({ id, abertura: req.abertura, prazo: req.prazo }, 201);
+  }
+  return json({ error: "busy" }, 503);
+}
+
+async function publicStatus(env, id, cnpj) {
+  const r = await env.DB.query("SELECT payload FROM requests WHERE id = ?", [str(id, 40).toUpperCase()]);
+  const req = r.rows && r.rows[0] ? parse(r.rows[0].payload) : null;
+  if (!req || onlyDigits(req.cnpj) !== onlyDigits(cnpj)) return json({ error: "not_found" }, 404);
+  return json({ id: req.id, status: req.status, abertura: req.abertura, prazo: req.prazo, ultimaAtualiz: req.ultimaAtualiz || req.abertura });
+}
+
+/* Consulta o CNPJ na base de clientes gocase (Datamart / Reseller) pelo proxy de dados
+ * do GoDeploy. O proxy autentica com o cookie de sessão do GoDeploy de quem está
+ * navegando — num app público ele pode não vir, e aí devolvemos found:false com o
+ * motivo (a tela mostra "indisponível"). Só a equipe logada chama esta rota. */
+async function resellerLookup(request, env, rawCnpj) {
+  const digits = onlyDigits(rawCnpj);
+  if (digits.length !== 14) return json({ found: false, error: "invalid_cnpj" }, 400);
+  if (!env.PROXY_BASE_URL) return json({ found: false, error: "proxy_unavailable" });
+  const formatted = fmtCnpj(digits);
+  const params = new URLSearchParams({
+    or: `(cpf_cnpj.eq.${digits},cpf_cnpj.eq.${formatted})`,
+    select: "nome_completo,nome_fantasia,cpf_cnpj,incricao_estadual,contribuinte_icms",
+    limit: "1",
+  });
+  // Repassa só os cookies da plataforma — nunca o nosso cookie de sessão.
+  const cookie = (request.headers.get("Cookie") || "").split(";").map((c) => c.trim())
+    .filter((c) => c && !c.startsWith(`${SESSION_COOKIE}=`)).join("; ");
+  try {
+    const upstream = await fetch(
+      `${env.PROXY_BASE_URL}/datamart/raw.webgex_clientes_gocase?${params.toString()}`,
+      { headers: { Cookie: cookie } },
+    );
+    if (upstream.status === 401) return json({ found: false, error: "not_authenticated" });
+    if (!upstream.ok) return json({ found: false, error: "lookup_failed" });
+    const rows = await upstream.json().catch(() => []);
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) return json({ found: false });
+    return json({
+      found: true, razaoSocial: row.nome_completo || "", nomeFantasia: row.nome_fantasia || row.nome_completo || "",
+      cnpj: row.cpf_cnpj || formatted, inscricaoEstadual: row.incricao_estadual || "", contribuinteIcms: row.contribuinte_icms || "",
+    });
+  } catch (e) {
+    return json({ found: false, error: "lookup_error" });
+  }
 }
 
 /* --------------------------------- router ---------------------------------- */
@@ -276,11 +494,77 @@ export default {
     try {
       await ensureSchema(env);
     } catch (e) {
-      return json({ error: "db_unavailable", detail: String(e) }, 500);
+      return json({ error: "db_unavailable" }, 500);
     }
 
     try {
+      /* ------------------------------ rotas abertas ------------------------------ */
       if (path === "/api/health") return json({ ok: true });
+
+      if (path === "/api/public/acervo" && method === "GET") {
+        const docs = (await listAcervo(env)).map((d) => ({ id: d.id, nome: d.nome, descricao: d.descricao || "" }));
+        return json({ acervo: docs });
+      }
+
+      if (path === "/api/public/files" && method === "POST") {
+        const body = (await request.json().catch(() => null)) || null;
+        if (!body || typeof body.data !== "string") return json({ error: "invalid_body" }, 400);
+        if (!PUBLIC_FILE_TYPES.includes(body.type)) return json({ error: "file_type" }, 415);
+        if (body.data.length > Math.ceil(PUBLIC_FILE_MAX / 3) * 4 + 4) return json({ error: "file_too_large" }, 413);
+        return fileRefResponse(await fileInsert(env, body), body);
+      }
+
+      if (path === "/api/public/cadastro" && method === "POST") {
+        const body = (await request.json().catch(() => null)) || null;
+        if (!body) return json({ error: "invalid_body" }, 400);
+        return await createCadastro(env, body);
+      }
+
+      if (path === "/api/public/status" && method === "GET") {
+        return await publicStatus(env, url.searchParams.get("id") || "", url.searchParams.get("cnpj") || "");
+      }
+
+      if (path === "/api/login" && method === "POST") {
+        const { email, password } = (await request.json().catch(() => ({}))) || {};
+        const em = lower(email);
+        if (!em || !password) return json({ error: "invalid" }, 401);
+        if (await loginThrottled(env, em)) return json({ error: "throttled" }, 429);
+        const u = await getUser(env, em);
+        const ok = u && !BLOCKED_PASSWORDS.includes(password) && (await verifyPassword(password, u.password));
+        if (!ok || !STAFF.includes(u.role)) { await loginFailed(env, em); return json({ error: "invalid" }, 401); }
+        if (u.status && u.status !== "Ativo") return json({ error: "inactive" }, 403);
+        await env.DB.exec("DELETE FROM login_attempts WHERE email = ?", [em]);
+        // Conta antiga com senha em texto puro: migra para hash agora que a senha foi confirmada.
+        if (!isHashed(u.password)) {
+          await env.DB.exec("UPDATE users SET password = ? WHERE email = ?", [await hashPassword(password), u.email]);
+        }
+        const token = await createSession(env, u.email);
+        return json({ user: stripPw(u), token }, 200, { "set-cookie": sessionCookie(token, SESSION_TTL_MS / 1000) });
+      }
+
+      if (path === "/api/logout" && method === "POST") {
+        const token = sessionToken(request);
+        if (token) await env.DB.exec("DELETE FROM sessions WHERE token = ?", [token]);
+        return json({ ok: true }, 200, { "set-cookie": sessionCookie("", 0) });
+      }
+
+      /* --------------------------- rotas da equipe --------------------------- */
+      const me = await staffUser(request, env);
+      if (!me) return json({ error: "unauthorized" }, 401);
+      const { token: _t, ...meUser } = me;
+      const isManager = MANAGERS.includes(me.role);
+
+      if (path === "/api/me" && method === "GET") return json({ user: meUser });
+
+      if (path === "/api/me/password" && method === "POST") {
+        const { current, next } = (await request.json().catch(() => ({}))) || {};
+        const u = await getUser(env, me.email);
+        if (!(await verifyPassword(current || "", u.password))) return json({ error: "invalid_current" }, 400);
+        if (senhaFraca(next)) return json({ error: "weak_password" }, 400);
+        await env.DB.exec("UPDATE users SET password = ? WHERE email = ?", [await hashPassword(next), u.email]);
+        await env.DB.exec("DELETE FROM sessions WHERE email = ? AND token <> ?", [u.email, me.token]);
+        return json({ ok: true });
+      }
 
       if (path === "/api/bootstrap" && method === "GET") {
         const [users, requests, notifications, templates, acervo] = await Promise.all([
@@ -293,52 +577,47 @@ export default {
         return json({ users, requests, notifications, templates, acervo });
       }
 
-      if (path === "/api/login" && method === "POST") {
-        const { email, password } = (await request.json().catch(() => ({}))) || {};
-        const u = await getUser(env, email);
-        if (!u || !(await verifyPassword(password, u.password))) return json({ error: "invalid" }, 401);
-        if (u.status && u.status !== "Ativo") return json({ error: "inactive" }, 403);
-        // Conta antiga com senha em texto puro: migra para hash agora que a senha foi confirmada.
-        if (!isHashed(u.password)) {
-          await env.DB.exec("UPDATE users SET password = ? WHERE email = ?", [await hashPassword(password), u.email]);
-        }
-        return json({ user: stripPw(u) });
-      }
-
-      if (path === "/api/signup" && method === "POST") {
-        const body = (await request.json().catch(() => ({}))) || {};
-        const email = lower(body.email);
-        if (!email || !body.password || !body.name)
-          return json({ error: "missing_fields" }, 400);
-        if (await getUser(env, email)) return json({ error: "exists" }, 409);
-        const user = await upsertUser(env, { ...body, role: body.role || "CLIENTE", status: "Ativo" });
-        return json({ user }, 201);
-      }
-
       if (path === "/api/users") {
         if (method === "GET") return json({ users: await listUsers(env) });
         if (method === "POST") {
+          if (!isManager) return json({ error: "forbidden" }, 403);
           const body = (await request.json().catch(() => ({}))) || {};
+          if (!lower(body.email) || !STAFF.includes(body.role)) return json({ error: "invalid_body" }, 400);
+          if (await getUser(env, body.email)) return json({ error: "exists" }, 409);
+          if (senhaFraca(body.password)) return json({ error: "weak_password" }, 400);
           return json({ user: await upsertUser(env, body) });
         }
       }
       if (path.startsWith("/api/users/") && method === "PATCH") {
+        if (!isManager) return json({ error: "forbidden" }, 403);
         const email = decodeURIComponent(path.slice("/api/users/".length));
         const existing = await getUser(env, email);
         if (!existing) return json({ error: "not_found" }, 404);
         const changes = (await request.json().catch(() => ({}))) || {};
-        return json({ user: await upsertUser(env, { ...existing, ...changes, email }) });
+        const allowed = {};
+        for (const k of ["name", "role", "status", "telefone", "contato"]) if (k in changes) allowed[k] = changes[k];
+        if ("role" in allowed && !STAFF.includes(allowed.role) && allowed.role !== "CLIENTE") return json({ error: "invalid_role" }, 400);
+        if ("password" in changes) {
+          if (senhaFraca(changes.password)) return json({ error: "weak_password" }, 400);
+          allowed.password = changes.password;
+        }
+        const user = await upsertUser(env, { ...existing, ...allowed, email });
+        if (allowed.status && allowed.status !== "Ativo") await env.DB.exec("DELETE FROM sessions WHERE email = ?", [lower(email)]);
+        return json({ user });
       }
       if (path.startsWith("/api/users/") && method === "DELETE") {
-        const email = decodeURIComponent(path.slice("/api/users/".length));
-        await env.DB.exec("DELETE FROM users WHERE email = ?", [lower(email)]);
+        if (!isManager) return json({ error: "forbidden" }, 403);
+        const email = lower(decodeURIComponent(path.slice("/api/users/".length)));
+        if (email === lower(me.email)) return json({ error: "self_delete" }, 400);
+        await env.DB.exec("DELETE FROM users WHERE email = ?", [email]);
+        await env.DB.exec("DELETE FROM sessions WHERE email = ?", [email]);
         return json({ ok: true });
       }
 
       if (path.startsWith("/api/requests/") && method === "PUT") {
         const id = decodeURIComponent(path.slice("/api/requests/".length));
         const req = (await request.json().catch(() => null)) || null;
-        if (!req || !req.id) return json({ error: "invalid_body" }, 400);
+        if (!req || !req.id || req.id !== id) return json({ error: "invalid_body" }, 400);
         await env.DB.exec(
           `INSERT INTO requests (id, owner_email, status, tipo, updated_ts, payload)
            VALUES (?, ?, ?, ?, ?, ?)
@@ -360,19 +639,7 @@ export default {
       if (path === "/api/notifications" && method === "POST") {
         const n = (await request.json().catch(() => null)) || null;
         if (!n || !n.id) return json({ error: "invalid_body" }, 400);
-        await env.DB.exec(
-          `INSERT INTO notifications (id, audience, for_user_email, read, ts, payload)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET read = excluded.read, payload = excluded.payload`,
-          [
-            n.id,
-            n.audience || "",
-            lower(n.forUserEmail || ""),
-            n.read ? 1 : 0,
-            n.ts || Date.now(),
-            JSON.stringify(n),
-          ],
-        );
+        await saveNotification(env, n);
         return json({ ok: true });
       }
       if (path === "/api/notifications/read" && method === "POST") {
@@ -401,6 +668,7 @@ export default {
         return json({ acervo: await listAcervo(env) });
       }
       if (path.startsWith("/api/acervo/")) {
+        if (!isManager) return json({ error: "forbidden" }, 403);
         const id = decodeURIComponent(path.slice("/api/acervo/".length));
         if (method === "PUT") {
           const doc = (await request.json().catch(() => null)) || null;
@@ -421,23 +689,20 @@ export default {
         const body = (await request.json().catch(() => null)) || null;
         if (!body || typeof body.data !== "string")
           return json({ error: "invalid_body" }, 400);
-        const id = await fileInsert(env, body);
-        return json({
-          id,
-          name: body.name || "arquivo",
-          type: body.type || "",
-          size: Number(body.size) || 0,
-          url: `/api/files/${id}`,
-        });
+        return fileRefResponse(await fileInsert(env, body), body);
       }
       if (path.startsWith("/api/files/") && method === "GET") {
         const id = decodeURIComponent(path.slice("/api/files/".length));
         return await fileResponse(env, id, url.searchParams.get("download") === "1");
       }
 
+      if (path === "/api/reseller-lookup" && method === "GET") {
+        return await resellerLookup(request, env, url.searchParams.get("cnpj") || "");
+      }
+
       return json({ error: "not_found" }, 404);
     } catch (e) {
-      return json({ error: "server_error", detail: String(e) }, 500);
+      return json({ error: "server_error" }, 500);
     }
   },
 };
