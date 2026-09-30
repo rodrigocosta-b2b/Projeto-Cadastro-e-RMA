@@ -533,7 +533,8 @@ const db = {
       problema: payload.mensagem || "Solicitação de cadastro / homologação de parceiro.", mensagemCadastro: payload.mensagem || "",
       anexos: (payload.anexos || []).map(({ preview, ...a }) => a),
       docsSolicitados: docs.map(doc => doc.nome),
-      docsEnviados: docs.map(doc => { const p = acervoPartes(doc); return { docId: doc.id, nome: doc.nome, url: p.arquivo ? p.arquivo.url : p.link, link: p.link, tipo: p.arquivo ? "arquivo" : "link", arquivoType: p.arquivo ? p.arquivo.type || "" : "", automatico: !!doc.envioAutomatico && !!(p.arquivo || p.link) }; }),
+      docsEnviados: docs.map(doc => { const p = acervoPartes(doc); return { docId: doc.id, nome: doc.nome, url: p.arquivo ? p.arquivo.url : p.link, link: p.link, tipo: p.arquivo ? "arquivo" : "link", arquivoType: p.arquivo ? p.arquivo.type || "" : "", automatico: !!doc.envioAutomatico && !!(p.arquivo || p.link) && !foraDaRegra(doc, acervoAll, empresaDoFornecedor(d.inscricaoEstadual, payload.mensagem).empresa) }; }),
+      empresaGocase: empresaDoFornecedor(d.inscricaoEstadual, payload.mensagem).empresa || "",
       listaDocumentos: payload.listaDocumentos || "", docsNaoEncontrados: payload.docsNaoEncontrados || [],
     };
     _ls.upsert(REQ_KEY, req, "id");
@@ -711,7 +712,7 @@ const DOC_SIN = {
 };
 const docNorm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 const docTokens = (s) => docNorm(s).split(" ").filter(t => t && !DOC_STOP.has(t));
-function casarListaDocumentos(texto, docs) {
+function casarListaDocumentos(texto, docs, empresa = null) {
   const itens = String(texto || "")
     .split(/\r?\n|;|,|•|•|\t/)
     .map(l => l.replace(/^\s*(\d+\s*[.)\-–:]|[-*–>·]|\[\s*x?\s*\])\s*/i, "").trim())
@@ -726,9 +727,49 @@ function casarListaDocumentos(texto, docs) {
       const score = hits / toks.length;
       if (score > melhor) { melhor = score; melhores = [d]; } else if (score === melhor && score > 0) melhores.push(d);
     }
+    // Empate entre BB e Go (ex.: "Declaração bancária"): fica só a empresa da regra.
+    if (empresa && melhores.some(d => docEmpresa(d.nome) === empresa)) melhores = melhores.filter(d => !docEmpresa(d.nome) || docEmpresa(d.nome) === empresa);
     if (melhor >= 0.6) melhores.forEach(d => ids.add(d.id)); else naoEncontrados.push(item);
   }
   return { ids, naoEncontrados, total: itens.length };
+}
+
+/* Regra de empresa gocase (BB Indústria × Go Comércio) — igual no worker.
+   Fornecedor isento de IE ou venda de Gift (citada na mensagem) → Go Comércio;
+   com Inscrição Estadual → BB Indústria. Vale para todo documento que existe nas
+   duas empresas (mesmo nome sem o nome da empresa); os que só existem para uma
+   empresa continuam disponíveis. */
+const EMPRESA_TOK = { bb: "bb", industria: "bb", go: "go", comercio: "go" };
+const EMPRESA_NOME = { bb: "BB Indústria", go: "Go Comércio" };
+function docEmpresa(nome) { for (const t of docTokens(nome)) if (EMPRESA_TOK[t]) return EMPRESA_TOK[t]; return null; }
+const docBase = (nome) => docTokens(nome).filter(t => !EMPRESA_TOK[t] && !/^\d+$/.test(t)).join(" ");
+const ehGift = (mensagem) => /\bgifts?\b/.test(docNorm(mensagem));
+function empresaDoFornecedor(ie, mensagem) {
+  if (ehGift(mensagem)) return { empresa: "go", motivo: "venda de Gift" };
+  const v = String(ie || "").trim().toUpperCase();
+  if (v === "ISENTO") return { empresa: "go", motivo: "empresa isenta de Inscrição Estadual" };
+  if (v) return { empresa: "bb", motivo: "empresa com Inscrição Estadual" };
+  return { empresa: null, motivo: "" };
+}
+// Documento de outra empresa que tem equivalente na empresa da regra → não se aplica.
+function contrapartes(doc, docs, empresa) {
+  const b = docBase(doc.nome);
+  return docs.filter(o => o.id !== doc.id && docEmpresa(o.nome) === empresa && docBase(o.nome) === b);
+}
+function foraDaRegra(doc, docs, empresa) {
+  const e = docEmpresa(doc.nome);
+  return !!(empresa && e && e !== empresa && contrapartes(doc, docs, empresa).length);
+}
+// Troca cada documento fora da regra pelo equivalente da empresa certa.
+function aplicarRegraEmpresa(ids, docs, empresa) {
+  const out = new Set();
+  for (const id of ids) {
+    const d = docs.find(x => x.id === id);
+    if (!d) continue;
+    if (foraDaRegra(d, docs, empresa)) contrapartes(d, docs, empresa).forEach(o => out.add(o.id));
+    else out.add(id);
+  }
+  return out;
 }
 
 // Indicador de etapas (wizard)
@@ -1357,6 +1398,7 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
                   ["CNPJ", r.cnpj], ["Inscrição estadual", ie ? (ie.toUpperCase() === "ISENTO" ? "Isento" : ie) : "Não informada"],
                   ["Situação cadastral", d.situacao || "—"], ["UF", r.uf],
                   ["Contato", d.nomeContato || "—"], ["Telefone", d.telefone || "—"],
+                  ...(r.empresaGocase ? [["Documentos da empresa", EMPRESA_NOME[r.empresaGocase] || r.empresaGocase]] : []),
                   ["E-mail", r.email || "—"], ["Endereço", endereco || "—"],
                 ];
               })().map(([k, v]) =>
@@ -1416,7 +1458,7 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
                       <span className="flex-1 min-w-0">
                         <span className="font-medium truncate block">{d.nome}</span>
                         <span className="text-[10px] font-semibold" style={{ color: d.automatico ? C.green : C.yellow }}>
-                          {d.automatico ? "Enviado automaticamente" : d.url ? "Enviar ao fornecedor" : "Sem arquivo no acervo — enviar manualmente"}
+                          {d.foraDaRegra ? "Outra empresa gocase — não se aplica" : d.automatico ? "Enviado automaticamente" : d.url ? "Enviar ao fornecedor" : "Sem arquivo no acervo — enviar manualmente"}
                         </span>
                       </span>
                       {d.url && <Download size={15} className="shrink-0" style={{ color: C.coral }} />}
@@ -1554,14 +1596,23 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
   const [casamento, setCasamento] = useState({ ids: new Set(), naoEncontrados: [], total: 0 });
   const [mensagem, setMensagem] = useState("");
   const set = (k) => (e) => setF(s => ({ ...s, [k]: e.target.value }));
-  const marcado = (id) => (id in solicitar ? solicitar[id] : casamento.ids.has(id));
+  // Empresa gocase cujos documentos o fornecedor recebe (BB × Go) — ver empresaDoFornecedor().
+  const regra = empresaDoFornecedor(f.inscricaoEstadual, mensagem);
+  const docsDaLista = aplicarRegraEmpresa(casamento.ids, docsDisponiveis, regra.empresa);
+  const finalIds = (() => {
+    const desejados = new Set([...casamento.ids, ...Object.keys(solicitar).filter(id => solicitar[id])]);
+    const out = aplicarRegraEmpresa(desejados, docsDisponiveis, regra.empresa);
+    Object.keys(solicitar).forEach(id => { if (solicitar[id] === false) out.delete(id); });
+    return out;
+  })();
+  const marcado = (id) => finalIds.has(id);
   const toggleDoc = (id) => setSolicitar(s => ({ ...s, [id]: !marcado(id) }));
   const selecionados = docsDisponiveis.filter(d => marcado(d.id));
   // Ao colar/editar a lista, marca sozinho as caixas correspondentes (sem clicar uma a uma).
   useEffect(() => {
-    const t = setTimeout(() => setCasamento(casarListaDocumentos(lista, docsDisponiveis)), 300);
+    const t = setTimeout(() => setCasamento(casarListaDocumentos(lista, docsDisponiveis, regra.empresa)), 300);
     return () => clearTimeout(t);
-  }, [lista, docsDisponiveis]);
+  }, [lista, docsDisponiveis, regra.empresa]);
   const isento = f.inscricaoEstadual.trim().toUpperCase() === "ISENTO";
   const cnpjOk = cnpjValido(f.cnpj);
 
@@ -1601,6 +1652,9 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
 
   const avancar = () => {
     if (!cnpjOk) { setErro("Informe um CNPJ válido para continuar."); return; }
+    if (!consultado) { setErro("Aguarde a consulta do CNPJ terminar."); if (!loading) localizar(); return; }
+    // A IE define de qual empresa gocase (BB ou Go) são os documentos enviados.
+    if (!f.inscricaoEstadual.trim()) { setErro("Informe a Inscrição Estadual ou marque \"Empresa isenta de IE\" para continuar."); return; }
     setErro(""); setStep(2);
   };
 
@@ -1740,14 +1794,23 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
               <p className="text-sm rounded-xl border px-3 py-3" style={{ borderColor: C.line, color: C.muted }}>Nenhum documento disponível no momento.</p>
             ) : (
               <>
+                {regra.empresa && (
+                  <div className="rounded-xl border px-3 py-2.5 mb-3 text-xs flex items-start gap-2" style={{ borderColor: C.cyan + "55", background: C.cyan + "10", color: C.text }}>
+                    <Building2 size={14} className="mt-0.5 shrink-0" style={{ color: C.cyan }} />
+                    <span>
+                      Você vai receber os documentos da <b>{EMPRESA_NOME[regra.empresa]}</b> ({regra.motivo}).
+                      {regra.empresa === "bb" && <> Se for <b>venda de Gift</b>, informe na mensagem abaixo.</>}
+                    </span>
+                  </div>
+                )}
                 <label className="text-xs font-semibold" style={{ color: C.muted }}>Tem uma lista pronta? Cole aqui e marcamos os documentos para você</label>
                 <textarea value={lista} onChange={e => setLista(e.target.value)} rows={3} maxLength={4000}
                   placeholder={"Ex.:\nCartão CNPJ\nContrato Social\nCND Federal, CND Estadual e CND Municipal"}
                   className="mt-1 w-full rounded-xl border px-3 py-2.5 text-sm resize-y bg-white" style={{ borderColor: C.line }} />
                 {lista.trim() && (
                   <div className="mt-1.5 mb-3 text-xs space-y-1">
-                    <div className="flex items-center gap-1 font-semibold" style={{ color: casamento.ids.size ? C.green : C.muted }}>
-                      <CheckCircle2 size={13} /> {casamento.ids.size ? `${casamento.ids.size} documento(s) marcado(s) a partir da lista — confira abaixo.` : "Nenhum documento do acervo reconhecido na lista."}
+                    <div className="flex items-center gap-1 font-semibold" style={{ color: docsDaLista.size ? C.green : C.muted }}>
+                      <CheckCircle2 size={13} /> {docsDaLista.size ? `${docsDaLista.size} documento(s) marcado(s) a partir da lista — confira abaixo.` : "Nenhum documento do acervo reconhecido na lista."}
                     </div>
                     {casamento.naoEncontrados.length > 0 && (
                       <div style={{ color: C.muted }}>
@@ -1759,6 +1822,17 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
                 <div className="space-y-2 mt-2">
                   {docsDisponiveis.map(d => {
                     const on = marcado(d.id);
+                    const fora = foraDaRegra(d, docsDisponiveis, regra.empresa);
+                    if (fora) return (
+                      <div key={d.id} className="w-full flex items-center gap-3 rounded-xl border border-dashed px-3 py-2.5 text-left opacity-60" style={{ borderColor: C.line }}
+                        title={`Não se aplica: você recebe os documentos da ${EMPRESA_NOME[regra.empresa]}.`}>
+                        <span className="w-5 h-5 rounded-md shrink-0" style={{ border: `1.5px solid ${C.line}` }} />
+                        <span className="flex-1 min-w-0">
+                          <span className="text-sm block line-through" style={{ color: C.muted }}>{d.nome}</span>
+                          <span className="text-[11px] block" style={{ color: C.muted }}>Não se aplica ao seu cadastro ({EMPRESA_NOME[regra.empresa]})</span>
+                        </span>
+                      </div>
+                    );
                     return (
                       <button key={d.id} onClick={() => toggleDoc(d.id)} className="w-full flex items-center gap-3 rounded-xl border px-3 py-3 text-left transition"
                         style={{ borderColor: on ? C.coral : C.line, background: on ? C.coralSoft : C.surface }}>
@@ -1784,7 +1858,7 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
                 <MessageSquare size={13} /> Mensagem para a equipe gocase (opcional)
               </div>
               <p className="text-xs mb-2" style={{ color: C.muted }}>
-                Descreva sua solicitação, informe detalhes adicionais, contexto da parceria ou qualquer dúvida para a equipe de cadastro da gocase.
+                Descreva sua solicitação, informe detalhes adicionais, contexto da parceria ou qualquer dúvida para a equipe de cadastro da gocase. <b style={{ color: C.text }}>Se for venda de Gift, informe aqui</b> — isso define os documentos que você recebe.
               </p>
               <textarea
                 value={mensagem}

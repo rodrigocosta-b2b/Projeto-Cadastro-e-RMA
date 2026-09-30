@@ -399,6 +399,28 @@ function acervoPartes(doc) {
   return { arquivo, link: /^https?:\/\//i.test(link) ? link : "" };
 }
 const acervoTemConteudo = (doc) => { const p = acervoPartes(doc); return !!(p.arquivo || p.link); };
+
+/* Regra de empresa gocase (igual ao cliente, ver empresaDoFornecedor no App.jsx):
+ * isento de IE ou venda de Gift (na mensagem) → Go Comércio; com IE → BB Indústria.
+ * Vale para documentos que existem nas duas empresas (mesmo nome sem a empresa). */
+const docNorm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const EMPRESA_TOK = { bb: "bb", industria: "bb", go: "go", comercio: "go" };
+const docEmpresa = (nome) => { for (const t of docNorm(nome).split(" ")) if (EMPRESA_TOK[t]) return EMPRESA_TOK[t]; return null; };
+const DOC_STOP = new Set(["de", "da", "do", "das", "dos", "e", "a", "o", "as", "os", "em", "para", "com", "na", "no", "ou", "por", "um", "uma", "copia", "via"]); // igual ao cliente
+const docBase = (nome) => docNorm(nome).split(" ").filter((t) => t && !DOC_STOP.has(t) && !EMPRESA_TOK[t] && !/^\d+$/.test(t)).join(" ");
+function empresaDoFornecedor(ie, mensagem) {
+  if (/\bgifts?\b/.test(docNorm(mensagem))) return "go";
+  const v = String(ie || "").trim().toUpperCase();
+  return v === "ISENTO" ? "go" : v ? "bb" : null;
+}
+// Documento de uma empresa que tem equivalente na outra: só vale se for da empresa da regra
+// (sem empresa definida, nenhum dos dois é liberado automaticamente).
+function docForaDaRegra(doc, acervo, empresa) {
+  const e = docEmpresa(doc.nome);
+  if (!e) return false;
+  const temPar = acervo.some((o) => o.id !== doc.id && docEmpresa(o.nome) && docEmpresa(o.nome) !== e && docBase(o.nome) === docBase(doc.nome));
+  return temPar && e !== empresa;
+}
 const fileIdFromUrl = (u) => (String(u || "").match(/^\/api\/files\/(f[0-9a-z]+)$/) || [])[1] || "";
 
 /* Documentos com "envio automático" liberados ao fornecedor: o link do Drive vai
@@ -435,17 +457,21 @@ async function createCadastro(env, body) {
     .filter((a) => a && /^\/api\/files\/f[0-9a-z]+$/.test(String(a.url || "")))
     .map((a) => ({ id: str(a.id, 60), name: str(a.name, 200), type: str(a.type, 100), size: Number(a.size) || 0, url: a.url }));
   const wanted = new Set((Array.isArray(body.docsSolicitados) ? body.docsSolicitados : []).map(String));
-  const docs = (await listAcervo(env)).filter((doc) => wanted.has(String(doc.id)));
+  const acervo = await listAcervo(env);
+  const docs = acervo.filter((doc) => wanted.has(String(doc.id)));
+  const empresa = empresaDoFornecedor(dados.inscricaoEstadual, mensagem); // "bb" | "go" | null
   // Lista colada pelo fornecedor: o texto original e os itens que não bateram com o acervo.
   const listaDocumentos = str(body.listaDocumentos, 4000);
   const docsNaoEncontrados = (Array.isArray(body.docsNaoEncontrados) ? body.docsNaoEncontrados : []).slice(0, 40).map((x) => str(x, 200)).filter(Boolean);
   const docsEnviados = docs.map((doc) => {
     const p = acervoPartes(doc);
+    const fora = docForaDaRegra(doc, acervo, empresa);
     return {
       docId: doc.id, nome: doc.nome,
       url: p.arquivo ? p.arquivo.url : p.link, link: p.link,
       tipo: p.arquivo ? "arquivo" : "link", arquivoType: p.arquivo ? p.arquivo.type || "" : "",
-      automatico: !!doc.envioAutomatico && acervoTemConteudo(doc),
+      automatico: !fora && !!doc.envioAutomatico && acervoTemConteudo(doc),
+      ...(fora ? { foraDaRegra: true } : {}),
     };
   });
 
@@ -469,6 +495,7 @@ async function createCadastro(env, body) {
       // automatico=true → liberado ao fornecedor na hora; os demais a equipe envia após a análise.
       docsEnviados,
       listaDocumentos, docsNaoEncontrados,
+      empresaGocase: empresa || "",
       entregaToken: docsEnviados.some((e) => e.automatico) ? randomToken(24) : "",
     };
     try {
