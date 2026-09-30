@@ -21,13 +21,14 @@
  *
  * API pública
  *   GET    /api/health
- *   GET    /api/public/acervo                   → [{ id, nome, descricao, envioAutomatico }] (sem links)
+ *   GET    /api/public/acervo                   → [{ id, nome, documento, empresa, descricao, envioAutomatico }] (sem links)
  *   POST   /api/public/files  {name,type,size,data(base64)} → { id, name, type, size, url }
  *   POST   /api/public/cadastro {cnpj, dados…}  → { id, abertura, prazo, entregues:[doc] }
  *   GET    /api/public/status?id=&cnpj=         → { id, status, abertura, prazo, ultimaAtualiz, entregues }
  *   GET    /api/public/entrega/:token/:docId    → arquivo de um documento do acervo com
- *          "envio automático" pedido nessa solicitação (token só vai para quem enviou).
- *          Documentos sem envio automático nunca saem por aqui: a equipe os envia.
+ *          "envio automático" ou enviado pela equipe nessa solicitação (token só vai para quem enviou).
+ *          Documentos sem envio automático só saem por aqui depois que a equipe clica em
+ *          "Enviar ao fornecedor" no chamado (docsEnviados[].liberado).
  *   POST   /api/login        {email,password}   → { user, token } + cookie | 401 | 403 | 429
  *   POST   /api/logout
  *   GET    /api/me                              → { user } | 401
@@ -83,6 +84,7 @@ function ensureSchema(env) {
       ];
       for (const sql of ddl) await env.DB.exec(sql, []);
       await secureAccounts(env);
+      await normalizarAcervo(env);
     })().catch((e) => {
       schemaReady = null;
       throw e;
@@ -413,37 +415,72 @@ function empresaDoFornecedor(ie, mensagem) {
   const v = String(ie || "").trim().toUpperCase();
   return v === "ISENTO" ? "go" : v ? "bb" : null;
 }
+// Empresa e "documento" (nome sem a empresa) de um item do acervo. Itens novos trazem
+// os campos `empresa` ("bb" | "go" | "") e `documento`; os antigos são lidos do nome.
+const EMPRESA_NOME = { bb: "BB Indústria", go: "Go Comércio" };
+const empresaDe = (doc) => (doc.empresa === "bb" || doc.empresa === "go" ? doc.empresa : doc.empresa === "" ? null : docEmpresa(doc.nome));
+const baseDe = (doc) => docBase(doc.documento || doc.nome);
+// Tira do nome as palavras da empresa ("BB", "Indústria", "Go", "Comércio") e separadores soltos.
+function nomeSemEmpresa(nome) {
+  let s = String(nome || "").replace(/\b(bb|ind[uú]stria|go|com[eé]rcio)\b/giu, " ").replace(/\s+/g, " ").trim();
+  let antes;
+  do { antes = s; s = s.replace(/^[\s—–\-\/|:·,()]+|[\s—–\-\/|:·,()]+$/g, "").replace(/[\s—–\-\/|]+\d+$/g, "").trim(); } while (s !== antes);
+  return s || String(nome || "").trim();
+}
+const nomeComEmpresa = (documento, empresa) => (empresa ? `${documento} — ${EMPRESA_NOME[empresa]}` : documento);
+
+/* Padroniza uma vez os documentos antigos do acervo (sem o campo `documento`) no
+ * formato "Documento — Empresa", para os pares BB/Go se formarem pelo nome. */
+async function normalizarAcervo(env) {
+  for (const doc of await listAcervo(env)) {
+    if (doc.documento !== undefined) continue;
+    const empresa = docEmpresa(doc.nome) || "";
+    const documento = empresa ? nomeSemEmpresa(doc.nome) : String(doc.nome || "").trim();
+    const novo = { ...doc, documento, empresa, nome: nomeComEmpresa(documento, empresa), nomeOriginal: doc.nome };
+    await env.DB.exec("UPDATE acervo SET payload = ? WHERE id = ?", [JSON.stringify(novo), doc.id]);
+  }
+}
+
 // Documento de uma empresa que tem equivalente na outra: só vale se for da empresa da regra
 // (sem empresa definida, nenhum dos dois é liberado automaticamente).
 function docForaDaRegra(doc, acervo, empresa) {
-  const e = docEmpresa(doc.nome);
+  const e = empresaDe(doc);
   if (!e) return false;
-  const temPar = acervo.some((o) => o.id !== doc.id && docEmpresa(o.nome) && docEmpresa(o.nome) !== e && docBase(o.nome) === docBase(doc.nome));
+  const temPar = acervo.some((o) => o.id !== doc.id && empresaDe(o) && empresaDe(o) !== e && baseDe(o) === baseDe(doc));
   return temPar && e !== empresa;
 }
 const fileIdFromUrl = (u) => (String(u || "").match(/^\/api\/files\/(f[0-9a-z]+)$/) || [])[1] || "";
+const linkHttp = (u) => (/^https?:\/\//i.test(String(u || "")) ? String(u) : "");
 
-/* Documentos com "envio automático" liberados ao fornecedor: o link do Drive vai
- * direto; o arquivo é servido por /api/public/entrega/:token/:docId. Sempre relê o
- * acervo atual, então desmarcar o envio automático (ou excluir o documento) revoga
- * o acesso na hora. */
-async function entregaPublica(env, req) {
+/* Documentos da solicitação que o fornecedor pode baixar:
+ *  - envio automático: o documento do acervo ainda existe e continua com envio automático;
+ *  - envio pela equipe (`liberado`): o arquivo anexado no chamado (`arquivoEnviado`)
+ *    ou, se não houver, o arquivo/link atual do acervo.
+ * O arquivo é servido por /api/public/entrega/:token/:docId; o link do Drive vai direto.
+ * `_fileUrl` é interno (nunca vai na resposta). */
+async function itensEntrega(env, req) {
   if (!req.entregaToken) return [];
   const atual = new Map((await listAcervo(env)).map((doc) => [String(doc.id), doc]));
-  return (req.docsEnviados || [])
-    .filter((e) => e.automatico && atual.has(String(e.docId)))
-    .map((e) => {
-      const doc = atual.get(String(e.docId));
-      if (!doc.envioAutomatico || !acervoTemConteudo(doc)) return null;
-      const p = acervoPartes(doc);
-      return {
-        id: doc.id, nome: doc.nome,
-        link: p.link,
-        arquivo: p.arquivo ? { url: `/api/public/entrega/${req.entregaToken}/${encodeURIComponent(doc.id)}`, name: p.arquivo.name || doc.nome, type: p.arquivo.type || "" } : null,
-      };
-    })
-    .filter(Boolean);
+  return (req.docsEnviados || []).map((e) => {
+    const doc = atual.get(String(e.docId));
+    let arquivo = null, link = "";
+    if (e.liberado) {
+      if (e.arquivoEnviado && fileIdFromUrl(e.arquivoEnviado.url)) arquivo = e.arquivoEnviado;
+      else if (doc) { const p = acervoPartes(doc); arquivo = p.arquivo; link = p.link; }
+      if (linkHttp(e.linkEnviado)) link = e.linkEnviado;
+    } else if (e.automatico && doc && doc.envioAutomatico) {
+      const p = acervoPartes(doc); arquivo = p.arquivo; link = p.link;
+    }
+    if (!arquivo && !link) return null;
+    const nome = e.nome || (doc && doc.nome) || "Documento";
+    return {
+      id: e.docId, nome, link,
+      arquivo: arquivo ? { url: `/api/public/entrega/${req.entregaToken}/${encodeURIComponent(e.docId)}`, name: arquivo.name || nome, type: arquivo.type || "" } : null,
+      _fileUrl: arquivo ? arquivo.url : "",
+    };
+  }).filter(Boolean);
 }
+const entregaPublica = async (env, req) => (await itensEntrega(env, req)).map(({ _fileUrl, ...item }) => item);
 
 async function createCadastro(env, body) {
   const digits = onlyDigits(body.cnpj);
@@ -526,18 +563,18 @@ async function publicStatus(env, id, cnpj) {
   });
 }
 
-// Arquivo de um documento com envio automático, para quem tem o token da solicitação.
+// Arquivo de um documento liberado (automático ou pela equipe), para quem tem o token da solicitação.
 async function entregaArquivo(env, token, docId) {
   if (!/^[0-9a-f]{48}$/.test(token)) return json({ error: "not_found" }, 404);
   const r = await env.DB.query("SELECT payload FROM requests WHERE json_extract(payload, '$.entregaToken') = ?", [token]);
   const req = r.rows && r.rows[0] ? parse(r.rows[0].payload) : null;
   if (!req) return json({ error: "not_found" }, 404);
-  const item = (await entregaPublica(env, req)).find((e) => String(e.id) === docId && e.arquivo);
-  if (!item) return json({ error: "not_found" }, 404);
-  const doc = (await listAcervo(env)).find((x) => String(x.id) === docId);
-  const fileId = fileIdFromUrl(acervoPartes(doc).arquivo.url);
+  const item = (await itensEntrega(env, req)).find((e) => String(e.id) === docId && e.arquivo);
+  const fileId = item ? fileIdFromUrl(item._fileUrl) : "";
   if (!fileId) return json({ error: "not_found" }, 404);
-  return fileResponse(env, fileId, false);
+  const res = await fileResponse(env, fileId, false);
+  res.headers.set("cache-control", "no-store"); // cancelar o envio precisa valer na hora
+  return res;
 }
 
 /* Consulta o CNPJ na base de clientes gocase (Datamart / Reseller) pelo proxy de dados
@@ -596,7 +633,7 @@ export default {
       if (path === "/api/health") return json({ ok: true });
 
       if (path === "/api/public/acervo" && method === "GET") {
-        const docs = (await listAcervo(env)).map((d) => ({ id: d.id, nome: d.nome, descricao: d.descricao || "", envioAutomatico: !!d.envioAutomatico && acervoTemConteudo(d) }));
+        const docs = (await listAcervo(env)).map((d) => ({ id: d.id, nome: d.nome, documento: d.documento || "", empresa: empresaDe(d) || "", descricao: d.descricao || "", envioAutomatico: !!d.envioAutomatico && acervoTemConteudo(d) }));
         return json({ acervo: docs });
       }
 
