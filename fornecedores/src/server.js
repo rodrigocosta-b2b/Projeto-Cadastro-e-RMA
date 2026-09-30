@@ -21,10 +21,13 @@
  *
  * API pública
  *   GET    /api/health
- *   GET    /api/public/acervo                   → [{ id, nome, descricao }] (sem links)
+ *   GET    /api/public/acervo                   → [{ id, nome, descricao, envioAutomatico }] (sem links)
  *   POST   /api/public/files  {name,type,size,data(base64)} → { id, name, type, size, url }
- *   POST   /api/public/cadastro {cnpj, dados…}  → { id, abertura, prazo }
- *   GET    /api/public/status?id=&cnpj=         → { id, status, abertura, prazo, ultimaAtualiz }
+ *   POST   /api/public/cadastro {cnpj, dados…}  → { id, abertura, prazo, entregues:[doc] }
+ *   GET    /api/public/status?id=&cnpj=         → { id, status, abertura, prazo, ultimaAtualiz, entregues }
+ *   GET    /api/public/entrega/:token/:docId    → arquivo de um documento do acervo com
+ *          "envio automático" pedido nessa solicitação (token só vai para quem enviou).
+ *          Documentos sem envio automático nunca saem por aqui: a equipe os envia.
  *   POST   /api/login        {email,password}   → { user, token } + cookie | 401 | 403 | 429
  *   POST   /api/logout
  *   GET    /api/me                              → { user } | 401
@@ -387,6 +390,39 @@ async function nextCadastroId(env, year) {
   return (nums.length ? Math.max(...nums) : 0) + 1;
 }
 
+/* Documento do acervo → { link, arquivo }. O link (Drive) é opcional: basta o
+ * arquivo enviado. Aceita o formato antigo (tipo "link"/"arquivo" + url). */
+function acervoPartes(doc) {
+  const arquivo = doc.arquivo && doc.arquivo.url ? doc.arquivo
+    : doc.tipo === "arquivo" && doc.url ? { url: doc.url, name: doc.arquivoNome || "", type: doc.arquivoType || "" } : null;
+  const link = doc.link !== undefined ? String(doc.link || "") : doc.tipo !== "arquivo" ? String(doc.url || "") : "";
+  return { arquivo, link: /^https?:\/\//i.test(link) ? link : "" };
+}
+const acervoTemConteudo = (doc) => { const p = acervoPartes(doc); return !!(p.arquivo || p.link); };
+const fileIdFromUrl = (u) => (String(u || "").match(/^\/api\/files\/(f[0-9a-z]+)$/) || [])[1] || "";
+
+/* Documentos com "envio automático" liberados ao fornecedor: o link do Drive vai
+ * direto; o arquivo é servido por /api/public/entrega/:token/:docId. Sempre relê o
+ * acervo atual, então desmarcar o envio automático (ou excluir o documento) revoga
+ * o acesso na hora. */
+async function entregaPublica(env, req) {
+  if (!req.entregaToken) return [];
+  const atual = new Map((await listAcervo(env)).map((doc) => [String(doc.id), doc]));
+  return (req.docsEnviados || [])
+    .filter((e) => e.automatico && atual.has(String(e.docId)))
+    .map((e) => {
+      const doc = atual.get(String(e.docId));
+      if (!doc.envioAutomatico || !acervoTemConteudo(doc)) return null;
+      const p = acervoPartes(doc);
+      return {
+        id: doc.id, nome: doc.nome,
+        link: p.link,
+        arquivo: p.arquivo ? { url: `/api/public/entrega/${req.entregaToken}/${encodeURIComponent(doc.id)}`, name: p.arquivo.name || doc.nome, type: p.arquivo.type || "" } : null,
+      };
+    })
+    .filter(Boolean);
+}
+
 async function createCadastro(env, body) {
   const digits = onlyDigits(body.cnpj);
   if (!cnpjValido(digits)) return json({ error: "invalid_cnpj" }, 400);
@@ -400,6 +436,18 @@ async function createCadastro(env, body) {
     .map((a) => ({ id: str(a.id, 60), name: str(a.name, 200), type: str(a.type, 100), size: Number(a.size) || 0, url: a.url }));
   const wanted = new Set((Array.isArray(body.docsSolicitados) ? body.docsSolicitados : []).map(String));
   const docs = (await listAcervo(env)).filter((doc) => wanted.has(String(doc.id)));
+  // Lista colada pelo fornecedor: o texto original e os itens que não bateram com o acervo.
+  const listaDocumentos = str(body.listaDocumentos, 4000);
+  const docsNaoEncontrados = (Array.isArray(body.docsNaoEncontrados) ? body.docsNaoEncontrados : []).slice(0, 40).map((x) => str(x, 200)).filter(Boolean);
+  const docsEnviados = docs.map((doc) => {
+    const p = acervoPartes(doc);
+    return {
+      docId: doc.id, nome: doc.nome,
+      url: p.arquivo ? p.arquivo.url : p.link, link: p.link,
+      tipo: p.arquivo ? "arquivo" : "link", arquivoType: p.arquivo ? p.arquivo.type || "" : "",
+      automatico: !!doc.envioAutomatico && acervoTemConteudo(doc),
+    };
+  });
 
   const now = Date.now();
   const year = fmtBR(now).slice(-4);
@@ -418,8 +466,10 @@ async function createCadastro(env, body) {
       mensagemCadastro: mensagem,
       anexos,
       docsSolicitados: docs.map((doc) => doc.nome),
-      // Links do acervo ficam só para a equipe, que os envia ao fornecedor após a análise.
-      docsEnviados: docs.map((doc) => ({ nome: doc.nome, url: doc.url || "", tipo: doc.tipo || "link", arquivoType: doc.arquivoType || "" })),
+      // automatico=true → liberado ao fornecedor na hora; os demais a equipe envia após a análise.
+      docsEnviados,
+      listaDocumentos, docsNaoEncontrados,
+      entregaToken: docsEnviados.some((e) => e.automatico) ? randomToken(24) : "",
     };
     try {
       await env.DB.exec(
@@ -434,7 +484,7 @@ async function createCadastro(env, body) {
       id: `n-${now}-${randomToken(3)}`, ts: now, read: false, audience: "interno", requestId: id, color: "#00B8D9",
       message: `Nova solicitação de cadastro recebida (${id}) de ${req.parceiro}.`,
     });
-    return json({ id, abertura: req.abertura, prazo: req.prazo }, 201);
+    return json({ id, abertura: req.abertura, prazo: req.prazo, entregues: await entregaPublica(env, req) }, 201);
   }
   return json({ error: "busy" }, 503);
 }
@@ -443,7 +493,24 @@ async function publicStatus(env, id, cnpj) {
   const r = await env.DB.query("SELECT payload FROM requests WHERE id = ?", [str(id, 40).toUpperCase()]);
   const req = r.rows && r.rows[0] ? parse(r.rows[0].payload) : null;
   if (!req || onlyDigits(req.cnpj) !== onlyDigits(cnpj)) return json({ error: "not_found" }, 404);
-  return json({ id: req.id, status: req.status, abertura: req.abertura, prazo: req.prazo, ultimaAtualiz: req.ultimaAtualiz || req.abertura });
+  return json({
+    id: req.id, status: req.status, abertura: req.abertura, prazo: req.prazo, ultimaAtualiz: req.ultimaAtualiz || req.abertura,
+    entregues: await entregaPublica(env, req),
+  });
+}
+
+// Arquivo de um documento com envio automático, para quem tem o token da solicitação.
+async function entregaArquivo(env, token, docId) {
+  if (!/^[0-9a-f]{48}$/.test(token)) return json({ error: "not_found" }, 404);
+  const r = await env.DB.query("SELECT payload FROM requests WHERE json_extract(payload, '$.entregaToken') = ?", [token]);
+  const req = r.rows && r.rows[0] ? parse(r.rows[0].payload) : null;
+  if (!req) return json({ error: "not_found" }, 404);
+  const item = (await entregaPublica(env, req)).find((e) => String(e.id) === docId && e.arquivo);
+  if (!item) return json({ error: "not_found" }, 404);
+  const doc = (await listAcervo(env)).find((x) => String(x.id) === docId);
+  const fileId = fileIdFromUrl(acervoPartes(doc).arquivo.url);
+  if (!fileId) return json({ error: "not_found" }, 404);
+  return fileResponse(env, fileId, false);
 }
 
 /* Consulta o CNPJ na base de clientes gocase (Datamart / Reseller) pelo proxy de dados
@@ -502,7 +569,7 @@ export default {
       if (path === "/api/health") return json({ ok: true });
 
       if (path === "/api/public/acervo" && method === "GET") {
-        const docs = (await listAcervo(env)).map((d) => ({ id: d.id, nome: d.nome, descricao: d.descricao || "" }));
+        const docs = (await listAcervo(env)).map((d) => ({ id: d.id, nome: d.nome, descricao: d.descricao || "", envioAutomatico: !!d.envioAutomatico && acervoTemConteudo(d) }));
         return json({ acervo: docs });
       }
 
@@ -518,6 +585,11 @@ export default {
         const body = (await request.json().catch(() => null)) || null;
         if (!body) return json({ error: "invalid_body" }, 400);
         return await createCadastro(env, body);
+      }
+
+      if (path.startsWith("/api/public/entrega/") && method === "GET") {
+        const [token = "", docId = ""] = path.slice("/api/public/entrega/".length).split("/").map((x) => decodeURIComponent(x));
+        return await entregaArquivo(env, token, docId);
       }
 
       if (path === "/api/public/status" && method === "GET") {

@@ -12,7 +12,7 @@ import {
   Send, ArrowLeft, ShieldCheck, FileCheck, Download, Phone, Mail,
   MapPin, Smartphone, MessageSquare, TrendingUp, Package, Check,
   Loader2, X, Film, FileText as FileIcon, ExternalLink, Maximize2, Minimize2, Save,
-  Sun, Moon, Monitor, Eye, LayoutGrid, List, Menu,
+  Sun, Moon, Monitor, Eye, LayoutGrid, List, Menu, Pencil,
 } from "lucide-react";
 // recharts é carregado sob demanda (import dinâmico, ver useRecharts()) — é a maior
 // fatia do bundle e só o Dashboard usa gráficos, então isolá-lo reduz o JS inicial
@@ -319,6 +319,15 @@ const _lsUsers = () => {
 };
 const fmtDataBR = (d) => `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
 
+// Modo local: documentos com envio automático, lidos do acervo atual (mesma regra do servidor).
+const _entregaLocal = (req) => {
+  const atual = new Map((_ls.get(ACERVO_KEY, null) || DEFAULT_ACERVO).map(d => [d.id, d]));
+  return (req.docsEnviados || []).filter(e => e.automatico && atual.get(e.docId)?.envioAutomatico).map(e => {
+    const doc = atual.get(e.docId); const p = acervoPartes(doc);
+    return { id: doc.id, nome: doc.nome, link: p.link, arquivo: p.arquivo ? { url: p.arquivo.url, name: p.arquivo.name || doc.nome, type: p.arquivo.type || "" } : null };
+  }).filter(d => d.arquivo || d.link);
+};
+
 const db = {
   // Sessão atual da equipe (null = visitante do formulário público).
   async me() {
@@ -524,11 +533,12 @@ const db = {
       problema: payload.mensagem || "Solicitação de cadastro / homologação de parceiro.", mensagemCadastro: payload.mensagem || "",
       anexos: (payload.anexos || []).map(({ preview, ...a }) => a),
       docsSolicitados: docs.map(doc => doc.nome),
-      docsEnviados: docs.map(doc => ({ nome: doc.nome, url: doc.url || "", tipo: doc.tipo || "link", arquivoType: doc.arquivoType || "" })),
+      docsEnviados: docs.map(doc => { const p = acervoPartes(doc); return { docId: doc.id, nome: doc.nome, url: p.arquivo ? p.arquivo.url : p.link, link: p.link, tipo: p.arquivo ? "arquivo" : "link", arquivoType: p.arquivo ? p.arquivo.type || "" : "", automatico: !!doc.envioAutomatico && !!(p.arquivo || p.link) }; }),
+      listaDocumentos: payload.listaDocumentos || "", docsNaoEncontrados: payload.docsNaoEncontrados || [],
     };
     _ls.upsert(REQ_KEY, req, "id");
     _ls.upsert(NOTIF_KEY, { id: `n-${Date.now()}`, ts: Date.now(), read: false, audience: "interno", requestId: id, color: C.cyan, message: `Nova solicitação de cadastro recebida (${id}) de ${req.parceiro}.` }, "id");
-    return { ok: true, id, abertura: req.abertura, prazo: req.prazo };
+    return { ok: true, id, abertura: req.abertura, prazo: req.prazo, entregues: _entregaLocal(req) };
   },
   // Status de uma solicitação pelo protocolo + CNPJ (não expõe outros dados).
   async publicStatus(id, cnpj) {
@@ -541,7 +551,7 @@ const db = {
     }
     const d = String(cnpj || "").replace(/\D/g, "");
     const r = (_ls.get(REQ_KEY, []) || []).find(x => x.id === String(id).trim().toUpperCase() && String(x.cnpj || "").replace(/\D/g, "") === d);
-    return r ? { id: r.id, status: r.status, abertura: r.abertura, prazo: r.prazo, ultimaAtualiz: r.ultimaAtualiz || r.abertura } : null;
+    return r ? { id: r.id, status: r.status, abertura: r.abertura, prazo: r.prazo, ultimaAtualiz: r.ultimaAtualiz || r.abertura, entregues: _entregaLocal(r) } : null;
   },
   // Base de clientes gocase (Datamart / Reseller) — só para a equipe logada.
   async resellerLookup(cnpj) {
@@ -684,6 +694,42 @@ const fmtCnpjInput = (v) => {
   const d = String(v || "").replace(/\D/g, "").slice(0, 14);
   return d.replace(/^(\d{2})(\d)/, "$1.$2").replace(/^(\d{2})\.(\d{3})(\d)/, "$1.$2.$3").replace(/\.(\d{3})(\d)/, ".$1/$2").replace(/(\d{4})(\d)/, "$1-$2");
 };
+
+/* Lista de documentos colada pelo fornecedor → documentos do acervo.
+   Cada linha (ou item separado por ; , •) é comparada com nome + descrição de cada
+   documento, sem acentos/pontuação e com alguns sinônimos (CND = certidão negativa,
+   RFB = federal…). Marca o(s) documento(s) de maior pontuação (empates entram
+   todos, ex.: "Cartão CNPJ" marca o da BB e o da Go). */
+const DOC_STOP = new Set(["de", "da", "do", "das", "dos", "e", "a", "o", "as", "os", "em", "para", "com", "na", "no", "ou", "por", "um", "uma", "copia", "via"]);
+const DOC_SIN = {
+  cnd: ["certidao", "negativa", "debitos"], certidao: ["cnd"], negativa: ["cnd"], debitos: ["cnd"],
+  rfb: ["federal", "receita"], federal: ["rfb"], receita: ["rfb", "federal"],
+  sefaz: ["estadual"], estadual: ["sefaz"], sefin: ["municipal"], municipal: ["sefin"],
+  balanco: ["demonstracoes", "financeiras", "balancete"], balancete: ["balanco"], demonstracoes: ["balanco"], financeiras: ["balanco"],
+  cartao: ["comprovante", "inscricao"], comprovante: ["cartao"], estatuto: ["contrato", "social"], minuta: ["contrato"],
+  banco: ["bancaria", "bancario"], bancaria: ["bancario", "banco"], bancario: ["bancaria", "banco"],
+};
+const docNorm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const docTokens = (s) => docNorm(s).split(" ").filter(t => t && !DOC_STOP.has(t));
+function casarListaDocumentos(texto, docs) {
+  const itens = String(texto || "")
+    .split(/\r?\n|;|,|•|•|\t/)
+    .map(l => l.replace(/^\s*(\d+\s*[.)\-–:]|[-*–>·]|\[\s*x?\s*\])\s*/i, "").trim())
+    .filter(l => docTokens(l).length);
+  const alvo = docs.map(d => ({ d, set: new Set(docTokens(`${d.nome} ${d.descricao || ""}`)) }));
+  const ids = new Set(); const naoEncontrados = [];
+  for (const item of itens) {
+    const toks = docTokens(item);
+    let melhor = 0, melhores = [];
+    for (const { d, set } of alvo) {
+      const hits = toks.filter(t => set.has(t) || (DOC_SIN[t] || []).some(x => set.has(x))).length;
+      const score = hits / toks.length;
+      if (score > melhor) { melhor = score; melhores = [d]; } else if (score === melhor && score > 0) melhores.push(d);
+    }
+    if (melhor >= 0.6) melhores.forEach(d => ids.add(d.id)); else naoEncontrados.push(item);
+  }
+  return { ids, naoEncontrados, total: itens.length };
+}
 
 // Indicador de etapas (wizard)
 function Stepper({ step, labels }) {
@@ -839,6 +885,7 @@ function ConsultaStatus() {
           </div>
         </Card>
       )}
+      {res && <DocsLiberados entregues={res.entregues || []} />}
     </div>
   );
 }
@@ -1356,28 +1403,43 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
               </p>
             </Card>
           )}
-          {r.docsSolicitados && r.docsSolicitados.length > 0 && (
+          {((r.docsEnviados && r.docsEnviados.length > 0) || (r.docsSolicitados && r.docsSolicitados.length > 0) || (r.docsNaoEncontrados && r.docsNaoEncontrados.length > 0)) && (
             <Card className="p-5">
-              <h2 className="font-bold mb-3" style={{ color: C.text }}>Documentos que o fornecedor pediu à gocase</h2>
-              <div className="space-y-2">
-                {r.docsSolicitados.map((d, i) => <div key={i} className="flex items-center gap-2 text-sm" style={{ color: C.text }}><FileCheck size={15} style={{ color: C.coral }} /> {d}</div>)}
-              </div>
-            </Card>
-          )}
-          {r.docsEnviados && r.docsEnviados.length > 0 && (
-            <Card className="p-5">
-              <h2 className="font-bold mb-1" style={{ color: C.text }}>Documentos do acervo para enviar</h2>
-              <p className="text-xs mb-3" style={{ color: C.muted }}>Links do acervo correspondentes ao pedido — envie ao fornecedor após a análise. Clique para abrir.</p>
-              <div className="grid sm:grid-cols-2 gap-2">
-                {r.docsEnviados.map((d, i) => (
-                  <button key={i} onClick={() => abrirDoc(d, null)}
-                    className="flex items-center gap-2 rounded-xl border px-3 py-2.5 text-sm hover:bg-gray-50 text-left w-full" style={{ borderColor: C.line, color: C.text, opacity: d.url ? 1 : 0.6 }}>
-                    <span className="rounded-lg p-1.5" style={{ background: C.coralSoft, color: C.coral }}><FileIcon size={15} /></span>
-                    <span className="flex-1 font-medium truncate">{d.nome}</span>
-                    {d.url ? <Download size={15} style={{ color: C.coral }} /> : <span className="text-[10px]" style={{ color: C.muted }}>sem link</span>}
-                  </button>
-                ))}
-              </div>
+              <h2 className="font-bold mb-1" style={{ color: C.text }}>Documentos que o fornecedor pediu à gocase</h2>
+              <p className="text-xs mb-3" style={{ color: C.muted }}>Os de <b>envio automático</b> já foram liberados ao fornecedor ao enviar a solicitação; os demais precisam ser enviados pela equipe. Clique para abrir.</p>
+              {r.docsEnviados && r.docsEnviados.length > 0 ? (
+                <div className="grid sm:grid-cols-2 gap-2">
+                  {r.docsEnviados.map((d, i) => (
+                    <button key={i} onClick={() => abrirDoc(d, null)}
+                      className="flex items-center gap-2 rounded-xl border px-3 py-2.5 text-sm hover:bg-gray-50 text-left w-full" style={{ borderColor: C.line, color: C.text, opacity: d.url ? 1 : 0.7 }}>
+                      <span className="rounded-lg p-1.5 shrink-0" style={{ background: C.coralSoft, color: C.coral }}><FileIcon size={15} /></span>
+                      <span className="flex-1 min-w-0">
+                        <span className="font-medium truncate block">{d.nome}</span>
+                        <span className="text-[10px] font-semibold" style={{ color: d.automatico ? C.green : C.yellow }}>
+                          {d.automatico ? "Enviado automaticamente" : d.url ? "Enviar ao fornecedor" : "Sem arquivo no acervo — enviar manualmente"}
+                        </span>
+                      </span>
+                      {d.url && <Download size={15} className="shrink-0" style={{ color: C.coral }} />}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {(r.docsSolicitados || []).map((d, i) => <div key={i} className="flex items-center gap-2 text-sm" style={{ color: C.text }}><FileCheck size={15} style={{ color: C.coral }} /> {d}</div>)}
+                </div>
+              )}
+              {r.docsNaoEncontrados && r.docsNaoEncontrados.length > 0 && (
+                <div className="mt-3 rounded-xl border px-3 py-2.5 text-xs" style={{ borderColor: C.yellow + "66", background: C.yellow + "12", color: C.text }}>
+                  <div className="font-semibold mb-1 flex items-center gap-1"><AlertTriangle size={13} style={{ color: C.yellow }} /> Itens da lista do fornecedor que não estão no acervo</div>
+                  {r.docsNaoEncontrados.join(" · ")}
+                </div>
+              )}
+              {r.listaDocumentos && (
+                <details className="mt-3 text-xs" style={{ color: C.muted }}>
+                  <summary className="cursor-pointer font-semibold">Lista colada pelo fornecedor</summary>
+                  <pre className="mt-2 whitespace-pre-wrap font-sans" style={{ color: C.text }}>{r.listaDocumentos}</pre>
+                </details>
+              )}
             </Card>
           )}
           {interno && !["CONCLUIDA", "NEGADA"].includes(r.status) && (
@@ -1431,11 +1493,44 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
 }
 
 /* ===================== External screens (acesso público) ===================== */
+// Documentos do acervo liberados ao fornecedor (envio automático) + os que a equipe
+// ainda vai enviar. Arquivos abrem no visualizador embutido; links do Drive também.
+function DocsLiberados({ entregues = [], pendentes = [] }) {
+  if (!entregues.length && !pendentes.length) return null;
+  return (
+    <Card className="p-5 mt-4">
+      {entregues.length > 0 && (
+        <>
+          <div className="flex items-center gap-2 mb-3">
+            <Download size={16} style={{ color: C.green }} />
+            <h2 className="font-bold" style={{ color: C.text }}>Documentos da gocase liberados para você</h2>
+          </div>
+          <div className="space-y-2">
+            {entregues.map(d => (
+              <div key={d.id} className="flex items-center gap-3 rounded-xl border px-3 py-2.5 flex-wrap" style={{ borderColor: C.line }}>
+                <span className="rounded-lg p-1.5 shrink-0" style={{ background: C.coralSoft, color: C.coral }}><FileIcon size={15} /></span>
+                <span className="flex-1 min-w-0 text-sm font-medium truncate" style={{ color: C.text }}>{d.nome}</span>
+                {d.arquivo && <Btn icon={Eye} variant="outline" onClick={() => abrirDoc({ ...d.arquivo, nome: d.arquivo.name || d.nome })}>Abrir / baixar</Btn>}
+                {d.link && <Btn icon={ExternalLink} variant="outline" onClick={() => abrirDoc(d.link)}>Link do Drive</Btn>}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      {pendentes.length > 0 && (
+        <p className={`text-xs ${entregues.length ? "mt-4" : ""}`} style={{ color: C.muted }}>
+          A equipe gocase envia depois da análise: <b style={{ color: C.text }}>{pendentes.join(", ")}</b>.
+        </p>
+      )}
+    </Card>
+  );
+}
+
 // Solicitação de cadastro aberta a qualquer pessoa: só o CNPJ é obrigatório. Ao
 // digitar os 14 dígitos, os dados são buscados na Receita Federal, inclusive se a
 // empresa tem Inscrição Estadual ativa ou é isenta.
 function ExtNovaCad({ toast, acervo, goStatus }) {
-  const docsDisponiveis = acervo || [];
+  const docsDisponiveis = useMemo(() => acervo || [], [acervo]);
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [enviando, setEnviando] = useState(false);
@@ -1453,10 +1548,20 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
   const [f, setF] = useState(vazio);
   const [meusDocs, setMeusDocs] = useState([]);
   const [uploadKey, setUploadKey] = useState(0);
-  const [solicitar, setSolicitar] = useState({}); // chaveado por id do documento do acervo
+  // Marcação manual (chaveada por id do documento do acervo) — prevalece sobre a lista colada.
+  const [solicitar, setSolicitar] = useState({});
+  const [lista, setLista] = useState(""); // lista de documentos colada pelo fornecedor
+  const [casamento, setCasamento] = useState({ ids: new Set(), naoEncontrados: [], total: 0 });
   const [mensagem, setMensagem] = useState("");
   const set = (k) => (e) => setF(s => ({ ...s, [k]: e.target.value }));
-  const toggleDoc = (id) => setSolicitar(s => ({ ...s, [id]: !s[id] }));
+  const marcado = (id) => (id in solicitar ? solicitar[id] : casamento.ids.has(id));
+  const toggleDoc = (id) => setSolicitar(s => ({ ...s, [id]: !marcado(id) }));
+  const selecionados = docsDisponiveis.filter(d => marcado(d.id));
+  // Ao colar/editar a lista, marca sozinho as caixas correspondentes (sem clicar uma a uma).
+  useEffect(() => {
+    const t = setTimeout(() => setCasamento(casarListaDocumentos(lista, docsDisponiveis)), 300);
+    return () => clearTimeout(t);
+  }, [lista, docsDisponiveis]);
   const isento = f.inscricaoEstadual.trim().toUpperCase() === "ISENTO";
   const cnpjOk = cnpjValido(f.cnpj);
 
@@ -1508,18 +1613,20 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
       dados: { ...dados, fonte },
       mensagem: mensagem.trim(),
       anexos: meusDocs.map(({ preview, ...a }) => a),
-      docsSolicitados: docsDisponiveis.filter(d => solicitar[d.id]).map(d => d.id),
+      docsSolicitados: selecionados.map(d => d.id),
+      listaDocumentos: lista.trim(),
+      docsNaoEncontrados: lista.trim() ? casamento.naoEncontrados : [],
     });
     setEnviando(false);
     if (!res.ok) {
       toast(res.reason === "invalid_cnpj" ? "CNPJ inválido. Confira o número." : "Não foi possível enviar agora. Tente novamente em instantes.");
       return;
     }
-    setProtocolo({ id: res.id, abertura: res.abertura, prazo: res.prazo, cnpj });
+    setProtocolo({ id: res.id, abertura: res.abertura, prazo: res.prazo, cnpj, entregues: res.entregues || [], pendentes: selecionados.filter(d => !(res.entregues || []).some(e => e.id === d.id)).map(d => d.nome) });
   };
 
   const novaSolicitacao = () => {
-    setF(vazio); setMeusDocs([]); setUploadKey(k => k + 1); setSolicitar({}); setMensagem("");
+    setF(vazio); setMeusDocs([]); setUploadKey(k => k + 1); setSolicitar({}); setLista(""); setMensagem("");
     setConsultado(false); setIeStatus(""); setFonte(""); setErro(""); setProtocolo(null); setStep(1);
     ieConsultadaRef.current = "";
     autoRef.current = "";
@@ -1543,6 +1650,7 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
           <Btn variant="outline" icon={Plus} onClick={novaSolicitacao}>Nova solicitação</Btn>
         </div>
       </Card>
+      <DocsLiberados entregues={protocolo.entregues} pendentes={protocolo.pendentes} />
     </div>
   );
 
@@ -1631,25 +1739,44 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
             {docsDisponiveis.length === 0 ? (
               <p className="text-sm rounded-xl border px-3 py-3" style={{ borderColor: C.line, color: C.muted }}>Nenhum documento disponível no momento.</p>
             ) : (
-              <div className="space-y-2">
-                {docsDisponiveis.map(d => {
-                  const on = !!solicitar[d.id];
-                  return (
-                    <button key={d.id} onClick={() => toggleDoc(d.id)} className="w-full flex items-center gap-3 rounded-xl border px-3 py-3 text-left transition"
-                      style={{ borderColor: on ? C.coral : C.line, background: on ? C.coralSoft : C.surface }}>
-                      <span className="w-5 h-5 rounded-md flex items-center justify-center shrink-0" style={{ background: on ? C.coral : C.surface, border: `1.5px solid ${on ? C.coral : C.line}` }}>
-                        {on && <Check size={13} color="#fff" />}
-                      </span>
-                      <span className="flex-1">
-                        <span className="text-sm font-medium block" style={{ color: C.text }}>{d.nome}</span>
-                        {d.descricao && <span className="text-xs block" style={{ color: C.muted }}>{d.descricao}</span>}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
+              <>
+                <label className="text-xs font-semibold" style={{ color: C.muted }}>Tem uma lista pronta? Cole aqui e marcamos os documentos para você</label>
+                <textarea value={lista} onChange={e => setLista(e.target.value)} rows={3} maxLength={4000}
+                  placeholder={"Ex.:\nCartão CNPJ\nContrato Social\nCND Federal, CND Estadual e CND Municipal"}
+                  className="mt-1 w-full rounded-xl border px-3 py-2.5 text-sm resize-y bg-white" style={{ borderColor: C.line }} />
+                {lista.trim() && (
+                  <div className="mt-1.5 mb-3 text-xs space-y-1">
+                    <div className="flex items-center gap-1 font-semibold" style={{ color: casamento.ids.size ? C.green : C.muted }}>
+                      <CheckCircle2 size={13} /> {casamento.ids.size ? `${casamento.ids.size} documento(s) marcado(s) a partir da lista — confira abaixo.` : "Nenhum documento do acervo reconhecido na lista."}
+                    </div>
+                    {casamento.naoEncontrados.length > 0 && (
+                      <div style={{ color: C.muted }}>
+                        Não encontrados no acervo (a equipe vai verificar): <b style={{ color: C.text }}>{casamento.naoEncontrados.join(" · ")}</b>
+                      </div>
+                    )}
+                  </div>
+                )}
+                <div className="space-y-2 mt-2">
+                  {docsDisponiveis.map(d => {
+                    const on = marcado(d.id);
+                    return (
+                      <button key={d.id} onClick={() => toggleDoc(d.id)} className="w-full flex items-center gap-3 rounded-xl border px-3 py-3 text-left transition"
+                        style={{ borderColor: on ? C.coral : C.line, background: on ? C.coralSoft : C.surface }}>
+                        <span className="w-5 h-5 rounded-md flex items-center justify-center shrink-0" style={{ background: on ? C.coral : C.surface, border: `1.5px solid ${on ? C.coral : C.line}` }}>
+                          {on && <Check size={13} color="#fff" />}
+                        </span>
+                        <span className="flex-1 min-w-0">
+                          <span className="text-sm font-medium block" style={{ color: C.text }}>{d.nome}</span>
+                          {d.descricao && <span className="text-xs block" style={{ color: C.muted }}>{d.descricao}</span>}
+                        </span>
+                        {d.envioAutomatico && <span className="shrink-0"><Pill label="Envio imediato" color={C.green} /></span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
             )}
-            <p className="text-xs mt-2" style={{ color: C.muted }}>A equipe gocase envia os documentos marcados pelo e-mail informado, depois da análise inicial.</p>
+            <p className="text-xs mt-2" style={{ color: C.muted }}>Documentos com <b style={{ color: C.text }}>envio imediato</b> ficam disponíveis para download assim que você enviar a solicitação. Os demais a equipe gocase envia pelo e-mail informado, depois da análise inicial.</p>
 
             {/* Caixa de mensagem */}
             <div className="mt-5 border-t pt-4" style={{ borderColor: C.line }}>
@@ -1696,7 +1823,7 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
             </div>
             <div className="mt-3 text-sm">
               <div className="text-xs" style={{ color: C.muted }}>Documentos solicitados da gocase</div>
-              <div className="font-medium" style={{ color: C.text }}>{docsDisponiveis.filter(d => solicitar[d.id]).map(d => d.nome).join(", ") || "Nenhum"}</div>
+              <div className="font-medium" style={{ color: C.text }}>{selecionados.map(d => d.nome).join(", ") || "Nenhum"}</div>
             </div>
             {!f.email.trim() && !f.telefone.trim() && (
               <div className="mt-4 rounded-xl border px-3 py-2.5 text-xs flex items-start gap-2" style={{ borderColor: C.yellow + "66", background: C.yellow + "14", color: C.text }}>
@@ -2703,7 +2830,17 @@ function Modal({ kind, onConfirm, onClose }) {
 
 
 /* ===================== Acervo de documentos (admin/gestor) ===================== */
-function AcervoDocs({ acervo, onAdd, onRemove, toast }) {
+/* Documento do acervo → { link, arquivo }. O link do Drive é só uma opção: o arquivo
+   enviado já basta. Aceita também o formato antigo (tipo "link"/"arquivo" + url). */
+function acervoPartes(d) {
+  const arquivo = d.arquivo && d.arquivo.url ? d.arquivo
+    : d.tipo === "arquivo" && d.url ? { url: d.url, name: d.arquivoNome || "", type: d.arquivoType || "" } : null;
+  const link = d.link !== undefined ? String(d.link || "") : d.tipo !== "arquivo" ? String(d.url || "") : "";
+  return { arquivo, link };
+}
+const linkValido = (u) => { try { const p = new URL(u); return p.protocol === "https:" || p.protocol === "http:"; } catch (e) { return false; } };
+
+function AcervoDocs({ acervo, onAdd, onUpdate, onRemove, toast }) {
   const docs = acervo || [];
   const [buscaDoc, setBuscaDoc] = useState("");
   const buscaDocN = buscaDoc.trim().toLowerCase();
@@ -2711,82 +2848,115 @@ function AcervoDocs({ acervo, onAdd, onRemove, toast }) {
     ? docs.filter(d => [d.nome, d.descricao].filter(Boolean).some(v => String(v).toLowerCase().includes(buscaDocN)))
     : docs;
   const { paged: docsPaginados, more: maisDocs } = usePagedList(docsFiltrados, buscaDocN);
-  const [nome, setNome] = useState("");
-  const [descricao, setDescricao] = useState("");
-  const [tipo, setTipo] = useState("link");
-  const [url, setUrl] = useState("");
-  const [arquivo, setArquivo] = useState(null);
+  const vazio = { nome: "", descricao: "", link: "", arquivo: null, envioAutomatico: false };
+  const [form, setForm] = useState(vazio);
+  const [editId, setEditId] = useState(null);
+  const [enviando, setEnviando] = useState(false);
   const [err, setErr] = useState("");
   const fileRef = useRef(null);
+  const formRef = useRef(null);
+  const setCampo = (k) => (e) => setForm(s => ({ ...s, [k]: e.target.value }));
+  const temConteudo = !!(form.arquivo || (form.link.trim() && linkValido(form.link.trim())));
 
   const onFile = async (e) => {
     const file = e.target.files?.[0]; if (e.target) e.target.value = "";
     if (!file) return;
-    if (file.size > 10000000) { setErr("Arquivo muito grande (máx. ~10 MB). Para arquivos maiores, use um link do Drive."); return; }
-    setErr("");
+    if (file.size > 10 * 1024 * 1024) { setErr("Arquivo muito grande (máx. 10 MB). Para arquivos maiores, use um link do Drive."); return; }
+    setErr(""); setEnviando(true);
     try {
       const up = await db.uploadFile(file); // grava no banco nativo
-      setArquivo({ nome: file.name, url: up.url, type: up.type, size: file.size });
-    } catch (err) { setErr("Falha ao enviar o arquivo."); }
+      setForm(s => ({ ...s, arquivo: { url: up.url, name: file.name, type: up.type || file.type || "", size: file.size } }));
+    } catch (er) { setErr("Falha ao enviar o arquivo."); }
+    finally { setEnviando(false); }
   };
 
-  const adicionar = () => {
-    if (!nome.trim()) { setErr("Informe o nome do documento."); return; }
-    if (tipo === "link" && !url.trim()) { setErr("Cole o link do documento (ex.: link compartilhável do Drive)."); return; }
-    if (tipo === "link") {
-      try { new URL(url.trim()); } catch { setErr("Cole uma URL completa e válida (começando com https://)."); return; }
-    }
-    if (tipo === "arquivo" && !arquivo) { setErr("Selecione um arquivo para enviar."); return; }
-    onAdd({
-      id: `doc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      nome: nome.trim(), descricao: descricao.trim(), tipo,
-      url: tipo === "link" ? url.trim() : arquivo.url,
-      ...(tipo === "arquivo" ? { arquivoNome: arquivo.nome, arquivoType: arquivo.type || "" } : {}),
-    });
-    toast(`Documento "${nome.trim()}" adicionado ao acervo.`);
-    setNome(""); setDescricao(""); setUrl(""); setArquivo(null); setErr("");
+  const limpar = () => { setForm(vazio); setEditId(null); setErr(""); };
+
+  const salvar = () => {
+    const nome = form.nome.trim(), link = form.link.trim();
+    if (!nome) { setErr("Informe o nome do documento."); return; }
+    if (link && !linkValido(link)) { setErr("O link é opcional, mas se informado precisa ser uma URL completa (https://…)."); return; }
+    if (form.envioAutomatico && !form.arquivo && !link) { setErr("Para envio automático, anexe o arquivo ou informe o link."); return; }
+    const doc = {
+      ...(editId ? docs.find(d => d.id === editId) : {}),
+      id: editId || `doc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      nome, descricao: form.descricao.trim(), link, arquivo: form.arquivo, envioAutomatico: !!form.envioAutomatico,
+      // campos do formato antigo, mantidos para compatibilidade (url = arquivo ou link)
+      tipo: form.arquivo ? "arquivo" : "link", url: form.arquivo ? form.arquivo.url : link,
+      arquivoNome: form.arquivo ? form.arquivo.name : "", arquivoType: form.arquivo ? form.arquivo.type || "" : "",
+    };
+    if (editId) { onUpdate(doc); toast(`Documento "${nome}" atualizado.`); }
+    else { onAdd(doc); toast(`Documento "${nome}" adicionado ao acervo.`); }
+    limpar();
   };
 
-  // Verifica se URL é abrível com segurança
-  const urlStatus = (d) => {
-    if (!d.url) return "pending";
-    if (d.url.startsWith("data:")) return "ok";
-    try { const p = new URL(d.url); return (p.protocol === "http:" || p.protocol === "https:") ? "ok" : "invalid"; }
-    catch { return "invalid"; }
+  const editar = (d) => {
+    const p = acervoPartes(d);
+    setForm({ nome: d.nome || "", descricao: d.descricao || "", link: p.link, arquivo: p.arquivo, envioAutomatico: !!d.envioAutomatico });
+    setEditId(d.id); setErr("");
+    setTimeout(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  };
+  const alternarAuto = (d) => {
+    const p = acervoPartes(d);
+    if (!d.envioAutomatico && !p.arquivo && !linkValido(p.link)) { toast("Anexe o arquivo ou um link antes de ativar o envio automático."); return; }
+    onUpdate({ ...d, envioAutomatico: !d.envioAutomatico });
+    toast(!d.envioAutomatico ? `"${d.nome}" agora é enviado automaticamente.` : `"${d.nome}" passa a ser enviado pela equipe.`);
   };
 
   return (
     <div className="max-w-3xl">
       <h1 className="text-2xl font-bold" style={{ color: C.text }}>Acervo de documentos para cadastro</h1>
       <p className="text-sm mb-4" style={{ color: C.muted }}>
-        Documentos que o cliente pode solicitar durante o cadastro. Ao marcar um documento, ele é enviado automaticamente na solicitação. Use links do Drive (compartilháveis) sempre que possível — basta atualizar o link aqui quando o arquivo mudar no Drive.
+        Documentos que o fornecedor pode pedir no cadastro. Basta o arquivo — o link do Drive é opcional. Os marcados com <b style={{ color: C.text }}>envio automático</b> ficam disponíveis para download assim que o fornecedor envia a solicitação; os demais a equipe envia depois da análise.
       </p>
 
-      <Card className="p-5 mb-4">
-        <h2 className="font-bold mb-3" style={{ color: C.text }}>Adicionar documento</h2>
+      <div ref={formRef} />
+      <Card className="p-5 mb-4" style={editId ? { borderColor: C.coral } : undefined}>
+        <h2 className="font-bold mb-3" style={{ color: C.text }}>{editId ? "Editar documento" : "Adicionar documento"}</h2>
         <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Nome do documento" value={nome} onChange={e => setNome(e.target.value)} />
-          <Field label="Descrição (opcional)" value={descricao} onChange={e => setDescricao(e.target.value)} />
+          <Field label="Nome do documento" value={form.nome} onChange={setCampo("nome")} />
+          <Field label="Descrição (opcional)" value={form.descricao} onChange={setCampo("descricao")} />
         </div>
-        <div className="flex gap-2 mt-4 mb-3">
-          {[["link", "Link (Drive)"], ["arquivo", "Enviar arquivo"]].map(([id, l]) => (
-            <button key={id} onClick={() => { setTipo(id); setErr(""); }} className="rounded-lg px-3 py-1.5 text-xs font-semibold"
-              style={tipo === id ? { background: C.coral, color: "white" } : { background: C.bg, color: C.muted }}>{l}</button>
-          ))}
-        </div>
-        {tipo === "link" ? (
-          <Field label="Link do documento (URL completa, ex.: https://drive.google.com/...)" value={url} onChange={e => setUrl(e.target.value)} full />
-        ) : (
-          <div>
-            <input ref={fileRef} type="file" className="hidden" onChange={onFile} accept="application/pdf,image/*,.doc,.docx,.xls,.xlsx" />
-            <button onClick={() => fileRef.current?.click()} className="w-full rounded-xl border-2 border-dashed p-4 text-sm" style={{ borderColor: C.line, color: C.muted }}>
-              <Paperclip size={16} className="inline mr-1" style={{ color: C.coral }} /> {arquivo ? `Selecionado: ${arquivo.nome}` : "Clique para selecionar um arquivo (máx. ~2,5 MB)"}
+
+        <div className="mt-4">
+          <div className="text-xs font-semibold mb-1" style={{ color: C.muted }}>Arquivo</div>
+          <input ref={fileRef} type="file" className="hidden" onChange={onFile} accept="application/pdf,image/*,.doc,.docx,.xls,.xlsx" />
+          {form.arquivo ? (
+            <div className="flex items-center gap-2 rounded-xl border px-3 py-2.5 text-sm" style={{ borderColor: C.line }}>
+              <FileIcon size={15} style={{ color: C.coral }} />
+              <span className="flex-1 truncate" style={{ color: C.text }}>{form.arquivo.name || "arquivo"}</span>
+              <button onClick={() => abrirDoc({ ...form.arquivo, nome: form.arquivo.name }, toast)} className="text-xs font-semibold" style={{ color: C.coral }}>abrir</button>
+              <button onClick={() => fileRef.current?.click()} className="text-xs font-semibold" style={{ color: C.muted }}>trocar</button>
+              <button onClick={() => setForm(s => ({ ...s, arquivo: null }))} className="text-xs font-semibold" style={{ color: C.danger }}>remover</button>
+            </div>
+          ) : (
+            <button onClick={() => !enviando && fileRef.current?.click()} className="w-full rounded-xl border-2 border-dashed p-4 text-sm" style={{ borderColor: C.line, color: C.muted }}>
+              {enviando ? <Loader2 size={16} className="inline mr-1 animate-spin" style={{ color: C.coral }} /> : <Paperclip size={16} className="inline mr-1" style={{ color: C.coral }} />}
+              {enviando ? "Enviando arquivo…" : "Clique para selecionar um arquivo (PDF, imagem, Word ou Excel — até 10 MB)"}
             </button>
-            <p className="text-[11px] mt-1" style={{ color: C.muted }}>Arquivos enviados ficam guardados no navegador. Para documentos grandes ou compartilhados entre dispositivos, prefira o link do Drive.</p>
-          </div>
-        )}
-        {err && <div className="text-xs mt-3 font-semibold" style={{ color: C.coral }}>{err}</div>}
-        <div className="mt-4"><Btn icon={Plus} onClick={adicionar}>Adicionar ao acervo</Btn></div>
+          )}
+        </div>
+
+        <div className="mt-4">
+          <Field label="Link do Drive (opcional)" value={form.link} onChange={setCampo("link")} full />
+          <p className="text-[11px] mt-1" style={{ color: C.muted }}>Se houver link, o fornecedor recebe o link e o arquivo. Útil quando o arquivo muda com frequência no Drive.</p>
+        </div>
+
+        <label className="mt-4 flex items-start gap-2 text-sm cursor-pointer" style={{ color: C.text }}>
+          <input type="checkbox" checked={form.envioAutomatico} onChange={e => setForm(s => ({ ...s, envioAutomatico: e.target.checked }))}
+            className="w-4 h-4 mt-0.5" style={{ accentColor: C.coral }} />
+          <span>
+            <b>Envio automático</b>
+            <span className="block text-xs" style={{ color: C.muted }}>Liberar para download assim que o fornecedor pedir, sem análise. Use só para documentos que podem ser compartilhados com qualquer solicitante (ex.: Cartão CNPJ, Alvará).</span>
+          </span>
+        </label>
+        {form.envioAutomatico && !temConteudo && <div className="text-xs mt-2 font-semibold" style={{ color: C.yellow }}>Anexe o arquivo ou informe o link para o envio automático funcionar.</div>}
+
+        {err && <div className="text-xs mt-3 font-semibold" style={{ color: C.danger }}>{err}</div>}
+        <div className="mt-4 flex gap-2">
+          <Btn icon={editId ? Save : Plus} onClick={salvar}>{editId ? "Salvar alterações" : "Adicionar ao acervo"}</Btn>
+          {editId && <Btn variant="outline" color={C.muted} onClick={limpar}>Cancelar</Btn>}
+        </div>
       </Card>
 
       <Card className="p-5">
@@ -2805,32 +2975,37 @@ function AcervoDocs({ acervo, onAdd, onRemove, toast }) {
         ) : (
           <div className="space-y-2">
             {docsPaginados.map(d => {
-              const st = urlStatus(d);
+              const p = acervoPartes(d);
+              const linkOk = p.link && linkValido(p.link);
+              const vazioDoc = !p.arquivo && !linkOk;
               return (
-                <div key={d.id} className="flex items-center gap-3 rounded-xl border px-3 py-3" style={{ borderColor: C.line }}>
+                <div key={d.id} className="flex items-center gap-3 rounded-xl border px-3 py-3" style={{ borderColor: editId === d.id ? C.coral : C.line }}>
                   <span className="rounded-lg p-2 shrink-0" style={{ background: C.coralSoft, color: C.coral }}><FileIcon size={16} /></span>
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-semibold truncate" style={{ color: C.text }}>{d.nome}</div>
                     {d.descricao && <div className="text-xs truncate" style={{ color: C.muted }}>{d.descricao}</div>}
                     <div className="text-[11px] mt-0.5 flex items-center gap-2 flex-wrap">
-                      <span style={{ color: C.muted }}>{d.tipo === "arquivo" ? `Arquivo${d.arquivoNome ? ` · ${d.arquivoNome}` : ""}` : "Link"}</span>
-                      {st === "ok" && (
-                        <button onClick={() => abrirDoc(d, toast)}
-                          className="inline-flex items-center gap-1 font-semibold hover:underline" style={{ color: C.coral }}>
-                          <ExternalLink size={11} /> abrir
+                      {p.arquivo && (
+                        <button onClick={() => abrirDoc({ ...p.arquivo, nome: p.arquivo.name || d.nome }, toast)} className="inline-flex items-center gap-1 font-semibold hover:underline" style={{ color: C.coral }}>
+                          <Paperclip size={11} /> {p.arquivo.name || "arquivo"}
                         </button>
                       )}
-                      {st === "invalid" && (
-                        <span className="font-semibold" style={{ color: C.yellow }}>
-                          ⚠ link inválido — edite e cole uma URL completa (https://...)
-                        </span>
+                      {linkOk && (
+                        <button onClick={() => abrirDoc(p.link, toast)} className="inline-flex items-center gap-1 font-semibold hover:underline" style={{ color: C.coral }}>
+                          <ExternalLink size={11} /> link do Drive
+                        </button>
                       )}
-                      {st === "pending" && (
-                        <span className="font-semibold" style={{ color: C.muted }}>sem link — pendente</span>
-                      )}
+                      {p.link && !linkOk && <span className="font-semibold" style={{ color: C.yellow }}>⚠ link inválido (opcional) — edite ou remova</span>}
+                      {vazioDoc && <span className="font-semibold" style={{ color: C.muted }}>sem arquivo — a equipe envia manualmente</span>}
                     </div>
                   </div>
-                  <button onClick={() => onRemove(d.id)} title="Excluir" className="shrink-0 rounded-lg p-2 hover:bg-gray-50" style={{ color: C.danger }}><X size={16} /></button>
+                  <button onClick={() => alternarAuto(d)} title={d.envioAutomatico ? "Envio automático ativo (clique para desativar)" : "Envio pela equipe (clique para ativar o envio automático)"}
+                    className="shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold whitespace-nowrap"
+                    style={d.envioAutomatico ? { background: C.green + "22", color: C.green, border: `1px solid ${C.green}55` } : { background: C.bg, color: C.muted, border: `1px solid ${C.line}` }}>
+                    {d.envioAutomatico ? "Envio automático" : "Envio pela equipe"}
+                  </button>
+                  <button onClick={() => editar(d)} title="Editar" className="shrink-0 rounded-lg p-2 hover:bg-gray-50" style={{ color: C.muted }}><Pencil size={16} /></button>
+                  <button onClick={() => { if (window.confirm(`Excluir "${d.nome}" do acervo?`)) { onRemove(d.id); if (editId === d.id) limpar(); } }} title="Excluir" className="shrink-0 rounded-lg p-2 hover:bg-gray-50" style={{ color: C.danger }}><X size={16} /></button>
                 </div>
               );
             })}
@@ -2911,6 +3086,7 @@ export default function App() {
   // Persistência por entidade — cada registro é salvo individualmente no env.DB.
   const saveTemplates = (next) => { setTemplates(next); db.saveTemplates(next); };
   const addAcervoDoc = (doc) => { setAcervo(a => [...a, doc]); db.saveAcervoDoc(doc); };
+  const updateAcervoDoc = (doc) => { setAcervo(a => a.map(d => d.id === doc.id ? doc : d)); db.saveAcervoDoc(doc); };
   const removeAcervoDoc = (id) => { setAcervo(a => a.filter(d => d.id !== id)); db.removeAcervoDoc(id); };
 
   const addUser = async (u) => {
@@ -3037,6 +3213,7 @@ export default function App() {
               : <ExtNovaCad toast={toast} acervo={publicAcervo} goStatus={() => setPublicView("status")} />}
           </PublicShell>
         )}
+      <DocViewer />
       <Toast />
     </>
   );
@@ -3056,7 +3233,7 @@ export default function App() {
   if (view === "detalhe") screen = <Detalhe r={selected} back={() => nav("lista-cad")} interno openModal={setModal} currentUser={currentUser} onSendMsg={sendChatMsg} onReopenRequest={reopenRequest} />;
   else if (view === "cliente") screen = <ClienteDetalhe nome={selId} requests={requests} users={users} nav={nav} />;
   else {
-    screen = { dash: <IntDash nav={nav} requests={requests} />, "lista-cad": <IntLista nav={nav} requests={requests} tipo="Cadastro" titulo="Solicitações de Cadastro" />, clientes: <Clientes requests={requests} users={users} nav={nav} />, acervo: (["ADMIN", "GESTOR"].includes(currentUser?.role) ? <AcervoDocs acervo={acervo} onAdd={addAcervoDoc} onRemove={removeAcervoDoc} toast={toast} /> : <IntDash nav={nav} requests={requests} />), usuarios: <Usuarios toast={toast} users={users} currentUser={currentUser} onAddUser={addUser} onUpdateUser={updateUser} onDeleteUser={removeUser} />, relatorios: <Relatorios toast={toast} requests={requests} />, config: <Config toast={toast} templates={templates} onSaveTemplates={saveTemplates} />, conta: <MinhaConta toast={toast} user={currentUser} /> }[view];
+    screen = { dash: <IntDash nav={nav} requests={requests} />, "lista-cad": <IntLista nav={nav} requests={requests} tipo="Cadastro" titulo="Solicitações de Cadastro" />, clientes: <Clientes requests={requests} users={users} nav={nav} />, acervo: (["ADMIN", "GESTOR"].includes(currentUser?.role) ? <AcervoDocs acervo={acervo} onAdd={addAcervoDoc} onUpdate={updateAcervoDoc} onRemove={removeAcervoDoc} toast={toast} /> : <IntDash nav={nav} requests={requests} />), usuarios: <Usuarios toast={toast} users={users} currentUser={currentUser} onAddUser={addUser} onUpdateUser={updateUser} onDeleteUser={removeUser} />, relatorios: <Relatorios toast={toast} requests={requests} />, config: <Config toast={toast} templates={templates} onSaveTemplates={saveTemplates} />, conta: <MinhaConta toast={toast} user={currentUser} /> }[view];
   }
 
   const visibleNotifs = notifications.filter(n => n.audience === "interno");
