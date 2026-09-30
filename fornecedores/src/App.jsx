@@ -220,29 +220,32 @@ const REQ_KEY = "gocase_forn_requests_v1";
 const NOTIF_KEY = "gocase_forn_notifs_v1";
 const TPL_KEY = "gocase_forn_templates_v1";
 const ACERVO_KEY = "gocase_forn_acervo_v1";
-// Acervo de documentos que o cliente pode solicitar no cadastro. Gerenciado por
-// admins/gestores na aba "Acervo de documentos". Cada item tem nome + link do Drive
-// (recomendado) ou um arquivo enviado (guardado no navegador). Ao marcar no cadastro,
-// o sistema entrega o documento automaticamente na solicitação do cliente.
+// Acervo de documentos que o fornecedor pode pedir no cadastro. Gerenciado por
+// admins/gestores na aba "Acervo de documentos". Cada item tem `documento` (nome sem a
+// empresa), `empresa` ("bb" | "go" | "" = vale para as duas) e o nome exibido
+// "Documento — Empresa" — é assim que os pares BB/Go se formam para a regra de empresa.
+// Arquivo e link do Drive são opcionais; `envioAutomatico` libera o download na hora.
+// (nome montado aqui sem depender de EMPRESA_NOME, que é declarado mais abaixo no arquivo)
+const acervoItem = (id, documento, empresa, descricao) => ({ id, documento, empresa, nome: empresa ? `${documento} — ${{ bb: "BB Indústria", go: "Go Comércio" }[empresa]}` : documento, descricao, tipo: "link", url: "" });
 const DEFAULT_ACERVO = [
-  { id: "doc-cartao-cnpj-bb", nome: "Cartão CNPJ — BB Indústria", descricao: "Comprovante de inscrição no CNPJ (abr/2026).", tipo: "link", url: "" },
-  { id: "doc-cartao-cnpj-go", nome: "Cartão CNPJ — Go Comércio", descricao: "Comprovante de inscrição no CNPJ (fev/2026).", tipo: "link", url: "" },
-  { id: "doc-contrato-social-bb", nome: "Contrato Social — BB Indústria", descricao: "Contrato social consolidado (14ª alteração).", tipo: "link", url: "" },
-  { id: "doc-contrato-social-go", nome: "Contrato Social — Go Comércio", descricao: "Contrato social consolidado (20ª alteração).", tipo: "link", url: "" },
-  { id: "doc-inscricao-municipal-bb", nome: "Inscrição Municipal — BB Indústria", descricao: "Inscrição municipal (Itapeva).", tipo: "link", url: "" },
-  { id: "doc-inscricao-municipal-go90", nome: "Inscrição Municipal — GO 90", descricao: "Inscrição municipal.", tipo: "link", url: "" },
-  { id: "doc-alvara-bb", nome: "Alvará de Funcionamento — BB Indústria", descricao: "Alvará de funcionamento.", tipo: "link", url: "" },
-  { id: "doc-alvara-go", nome: "Alvará de Funcionamento — Go Comércio", descricao: "Alvará de funcionamento (venc. 31.12.2026).", tipo: "link", url: "" },
-  { id: "doc-cnd-rfb-bb", nome: "CND RFB / Federal — BB Indústria", descricao: "Certidão Negativa de Débitos federais.", tipo: "link", url: "" },
-  { id: "doc-cnd-sefaz-bb", nome: "CND SEFAZ / Estadual — BB Indústria", descricao: "Certidão Negativa de Débitos estaduais.", tipo: "link", url: "" },
-  { id: "doc-cnd-sefin-bb", nome: "CND SEFIN / Municipal — BB Indústria", descricao: "Certidão Negativa de Débitos municipais.", tipo: "link", url: "" },
-  { id: "doc-balanco-contas-bb", nome: "Balanço de Contas — BB Indústria", descricao: "Balanço (1º tri/2025), assinado.", tipo: "link", url: "" },
-  { id: "doc-balanco-contas-go", nome: "Balanço de Contas — Go Comércio", descricao: "Demonstrações financeiras 31.12.2025, assinado.", tipo: "link", url: "" },
-  { id: "doc-declaracao-faturamento-go", nome: "Declaração de Faturamento — Go Comércio", descricao: "Declaração de faturamento 2025, assinada.", tipo: "link", url: "" },
-  { id: "doc-comprovante-bancario-bb", nome: "Comprovante Bancário — BB Indústria", descricao: "Comprovante bancário assinado (dez/2025).", tipo: "link", url: "" },
-  { id: "doc-declaracao-bancaria-bb", nome: "Declaração Bancária — BB Indústria", descricao: "Declaração bancária.", tipo: "link", url: "" },
-  { id: "doc-declaracao-conta-go", nome: "Declaração de Conta Bancária — Go Comércio", descricao: "Declaração de abertura e manutenção de conta.", tipo: "link", url: "" },
-  { id: "doc-minuta-contrato-b2b", nome: "Minuta padrão — Contrato B2B", descricao: "Modelo padrão de contrato B2B.", tipo: "link", url: "" },
+  acervoItem("doc-cartao-cnpj-bb", "Cartão CNPJ", "bb", "Comprovante de inscrição no CNPJ (abr/2026)."),
+  acervoItem("doc-cartao-cnpj-go", "Cartão CNPJ", "go", "Comprovante de inscrição no CNPJ (fev/2026)."),
+  acervoItem("doc-contrato-social-bb", "Contrato Social", "bb", "Contrato social consolidado (14ª alteração)."),
+  acervoItem("doc-contrato-social-go", "Contrato Social", "go", "Contrato social consolidado (20ª alteração)."),
+  acervoItem("doc-inscricao-municipal-bb", "Inscrição Municipal", "bb", "Inscrição municipal (Itapeva)."),
+  acervoItem("doc-inscricao-municipal-go90", "Inscrição Municipal", "go", "Inscrição municipal (GO 90)."),
+  acervoItem("doc-alvara-bb", "Alvará de Funcionamento", "bb", "Alvará de funcionamento."),
+  acervoItem("doc-alvara-go", "Alvará de Funcionamento", "go", "Alvará de funcionamento (venc. 31.12.2026)."),
+  acervoItem("doc-cnd-rfb-bb", "CND RFB / Federal", "bb", "Certidão Negativa de Débitos federais."),
+  acervoItem("doc-cnd-sefaz-bb", "CND SEFAZ / Estadual", "bb", "Certidão Negativa de Débitos estaduais."),
+  acervoItem("doc-cnd-sefin-bb", "CND SEFIN / Municipal", "bb", "Certidão Negativa de Débitos municipais."),
+  acervoItem("doc-balanco-contas-bb", "Balanço de Contas", "bb", "Balanço (1º tri/2025), assinado."),
+  acervoItem("doc-balanco-contas-go", "Balanço de Contas", "go", "Demonstrações financeiras 31.12.2025, assinado."),
+  acervoItem("doc-declaracao-faturamento-go", "Declaração de Faturamento", "go", "Declaração de faturamento 2025, assinada."),
+  acervoItem("doc-comprovante-bancario-bb", "Comprovante Bancário", "bb", "Comprovante bancário assinado (dez/2025)."),
+  acervoItem("doc-declaracao-bancaria-bb", "Declaração Bancária", "bb", "Declaração bancária."),
+  acervoItem("doc-declaracao-conta-go", "Declaração Bancária", "go", "Declaração de abertura e manutenção de conta."),
+  acervoItem("doc-minuta-contrato-b2b", "Minuta padrão — Contrato B2B", "", "Modelo padrão de contrato B2B."),
 ];
 // Modelos de resposta rápida (e-mail automático ao cliente). Placeholders: {id} {cliente} {status}
 const DEFAULT_TEMPLATES = {
@@ -319,13 +322,21 @@ const _lsUsers = () => {
 };
 const fmtDataBR = (d) => `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
 
-// Modo local: documentos com envio automático, lidos do acervo atual (mesma regra do servidor).
+// Modo local: documentos liberados (envio automático ou pela equipe), lidos do acervo
+// atual — mesma regra de itensEntrega() no servidor.
 const _entregaLocal = (req) => {
   const atual = new Map((_ls.get(ACERVO_KEY, null) || DEFAULT_ACERVO).map(d => [d.id, d]));
-  return (req.docsEnviados || []).filter(e => e.automatico && atual.get(e.docId)?.envioAutomatico).map(e => {
-    const doc = atual.get(e.docId); const p = acervoPartes(doc);
-    return { id: doc.id, nome: doc.nome, link: p.link, arquivo: p.arquivo ? { url: p.arquivo.url, name: p.arquivo.name || doc.nome, type: p.arquivo.type || "" } : null };
-  }).filter(d => d.arquivo || d.link);
+  return (req.docsEnviados || []).map(e => {
+    const doc = atual.get(e.docId);
+    let arquivo = null, link = "";
+    if (e.liberado) {
+      if (e.arquivoEnviado?.url) arquivo = e.arquivoEnviado;
+      else if (doc) ({ arquivo, link } = acervoPartes(doc));
+    } else if (e.automatico && doc?.envioAutomatico) ({ arquivo, link } = acervoPartes(doc));
+    if (!arquivo && !link) return null;
+    const nome = e.nome || doc?.nome || "Documento";
+    return { id: e.docId, nome, link, arquivo: arquivo ? { url: arquivo.url, name: arquivo.name || nome, type: arquivo.type || "" } : null };
+  }).filter(Boolean);
 };
 
 const db = {
@@ -728,7 +739,7 @@ function casarListaDocumentos(texto, docs, empresa = null) {
       if (score > melhor) { melhor = score; melhores = [d]; } else if (score === melhor && score > 0) melhores.push(d);
     }
     // Empate entre BB e Go (ex.: "Declaração bancária"): fica só a empresa da regra.
-    if (empresa && melhores.some(d => docEmpresa(d.nome) === empresa)) melhores = melhores.filter(d => !docEmpresa(d.nome) || docEmpresa(d.nome) === empresa);
+    if (empresa && melhores.some(d => empresaDe(d) === empresa)) melhores = melhores.filter(d => !empresaDe(d) || empresaDe(d) === empresa);
     if (melhor >= 0.6) melhores.forEach(d => ids.add(d.id)); else naoEncontrados.push(item);
   }
   return { ids, naoEncontrados, total: itens.length };
@@ -743,6 +754,17 @@ const EMPRESA_TOK = { bb: "bb", industria: "bb", go: "go", comercio: "go" };
 const EMPRESA_NOME = { bb: "BB Indústria", go: "Go Comércio" };
 function docEmpresa(nome) { for (const t of docTokens(nome)) if (EMPRESA_TOK[t]) return EMPRESA_TOK[t]; return null; }
 const docBase = (nome) => docTokens(nome).filter(t => !EMPRESA_TOK[t] && !/^\d+$/.test(t)).join(" ");
+// Empresa e documento (nome sem a empresa) de um item do acervo: campos `empresa`
+// ("bb" | "go" | "" = nenhuma) e `documento`; itens antigos são lidos do nome.
+const empresaDe = (d) => (d.empresa === "bb" || d.empresa === "go" ? d.empresa : d.empresa === "" ? null : docEmpresa(d.nome));
+const baseDe = (d) => docBase(d.documento || d.nome);
+const nomeComEmpresa = (documento, empresa) => (empresa ? `${documento} — ${EMPRESA_NOME[empresa]}` : documento);
+function nomeSemEmpresa(nome) {
+  let s = String(nome || "").replace(/\b(bb|ind[uú]stria|go|com[eé]rcio)\b/giu, " ").replace(/\s+/g, " ").trim();
+  let antes;
+  do { antes = s; s = s.replace(/^[\s—–\-\/|:·,()]+|[\s—–\-\/|:·,()]+$/g, "").replace(/[\s—–\-\/|]+\d+$/g, "").trim(); } while (s !== antes);
+  return s || String(nome || "").trim();
+}
 const ehGift = (mensagem) => /\bgifts?\b/.test(docNorm(mensagem));
 function empresaDoFornecedor(ie, mensagem) {
   if (ehGift(mensagem)) return { empresa: "go", motivo: "venda de Gift" };
@@ -753,11 +775,11 @@ function empresaDoFornecedor(ie, mensagem) {
 }
 // Documento de outra empresa que tem equivalente na empresa da regra → não se aplica.
 function contrapartes(doc, docs, empresa) {
-  const b = docBase(doc.nome);
-  return docs.filter(o => o.id !== doc.id && docEmpresa(o.nome) === empresa && docBase(o.nome) === b);
+  const b = baseDe(doc);
+  return docs.filter(o => o.id !== doc.id && empresaDe(o) === empresa && baseDe(o) === b);
 }
 function foraDaRegra(doc, docs, empresa) {
-  const e = docEmpresa(doc.nome);
+  const e = empresaDe(doc);
   return !!(empresa && e && e !== empresa && contrapartes(doc, docs, empresa).length);
 }
 // Troca cada documento fora da regra pelo equivalente da empresa certa.
@@ -1368,8 +1390,63 @@ function ResellerCard({ cnpj }) {
   );
 }
 
+/* Documento pedido pelo fornecedor, no chamado. A equipe envia com um clique (usa o
+   arquivo/link atual do acervo) ou anexa um arquivo na hora; o fornecedor baixa em
+   "Acompanhar solicitação" (protocolo + CNPJ). O envio pode ser cancelado. */
+function DocEnvioItem({ d, acervo, interno, onLiberar, onCancelar }) {
+  const fileRef = useRef(null);
+  const [enviando, setEnviando] = useState(false);
+  const doc = (acervo || []).find(x => x.id === d.docId);
+  const partes = doc ? acervoPartes(doc) : { arquivo: null, link: "" };
+  const conteudo = d.arquivoEnviado || partes.arquivo || (linkValido(partes.link) ? partes.link : null);
+  const abrir = () => {
+    if (d.arquivoEnviado) abrirDoc({ ...d.arquivoEnviado, nome: d.arquivoEnviado.name || d.nome });
+    else if (partes.arquivo) abrirDoc({ ...partes.arquivo, nome: partes.arquivo.name || d.nome });
+    else if (linkValido(partes.link)) abrirDoc(partes.link);
+    else if (d.url) abrirDoc(d);
+  };
+  const anexar = async (e) => {
+    const file = e.target.files?.[0]; if (e.target) e.target.value = "";
+    if (!file) return;
+    setEnviando(true);
+    try { const up = await db.uploadFile(file); await onLiberar(d.docId, { url: up.url, name: file.name, type: up.type || file.type || "" }); }
+    finally { setEnviando(false); }
+  };
+  const quando = d.liberadoTs ? new Date(d.liberadoTs).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+  const status = d.automatico ? { t: "Enviado automaticamente", c: C.green }
+    : d.liberado ? { t: `Enviado pela equipe${quando ? ` em ${quando}` : ""}${d.liberadoPor ? ` · ${d.liberadoPor}` : ""}`, c: C.green }
+    : d.foraDaRegra ? { t: "Outra empresa gocase — não se aplica", c: C.muted }
+    : { t: conteudo ? "Pendente de envio" : "Sem arquivo no acervo — anexe para enviar", c: C.yellow };
+  return (
+    <div className="rounded-xl border px-3 py-2.5 text-sm" style={{ borderColor: C.line, color: C.text }}>
+      <div className="flex items-center gap-2">
+        <button onClick={abrir} disabled={!conteudo && !d.url} className="rounded-lg p-1.5 shrink-0" title="Abrir" style={{ background: C.coralSoft, color: C.coral, opacity: conteudo || d.url ? 1 : .5 }}><FileIcon size={15} /></button>
+        <span className="flex-1 min-w-0">
+          <button onClick={abrir} disabled={!conteudo && !d.url} className="font-medium truncate block text-left max-w-full hover:underline disabled:no-underline">{d.nome}</button>
+          <span className="text-[10px] font-semibold" style={{ color: status.c }}>{status.t}</span>
+        </span>
+      </div>
+      {interno && !d.automatico && (
+        <div className="flex gap-3 flex-wrap mt-2 pl-9 text-xs font-semibold">
+          <input ref={fileRef} type="file" className="hidden" onChange={anexar} accept="application/pdf,image/*,.doc,.docx,.xls,.xlsx" />
+          {d.liberado ? (
+            <button onClick={() => onCancelar(d.docId)} style={{ color: C.danger }}>Cancelar envio</button>
+          ) : (
+            <>
+              {conteudo && <button onClick={() => onLiberar(d.docId, null)} className="inline-flex items-center gap-1" style={{ color: C.green }}><Send size={12} /> Enviar ao fornecedor</button>}
+              <button onClick={() => !enviando && fileRef.current?.click()} className="inline-flex items-center gap-1" style={{ color: C.coral }}>
+                {enviando ? <Loader2 size={12} className="animate-spin" /> : <Paperclip size={12} />} {conteudo ? "Anexar outro arquivo e enviar" : "Anexar arquivo e enviar"}
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ===================== Detalhe ===================== */
-function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopenRequest }) {
+function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopenRequest, acervo, onLiberarDoc, onCancelarEnvio, toast }) {
   if (!r) return null;
   const tl = buildTimeline(r);
   return (
@@ -1447,22 +1524,21 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
           )}
           {((r.docsEnviados && r.docsEnviados.length > 0) || (r.docsSolicitados && r.docsSolicitados.length > 0) || (r.docsNaoEncontrados && r.docsNaoEncontrados.length > 0)) && (
             <Card className="p-5">
-              <h2 className="font-bold mb-1" style={{ color: C.text }}>Documentos que o fornecedor pediu à gocase</h2>
-              <p className="text-xs mb-3" style={{ color: C.muted }}>Os de <b>envio automático</b> já foram liberados ao fornecedor ao enviar a solicitação; os demais precisam ser enviados pela equipe. Clique para abrir.</p>
+              <div className="flex items-start justify-between gap-2 flex-wrap mb-1">
+                <h2 className="font-bold" style={{ color: C.text }}>Documentos que o fornecedor pediu à gocase</h2>
+                {interno && (r.docsEnviados || []).some(d => d.liberado || d.automatico) && (
+                  <button onClick={() => {
+                    const txt = `Olá! Os documentos da gocase da sua solicitação ${r.id} estão disponíveis para download em ${window.location.origin} → "Acompanhar solicitação" (protocolo ${r.id} e CNPJ ${r.cnpj}).`;
+                    try { navigator.clipboard.writeText(txt).then(() => toast && toast("Aviso copiado — cole no e-mail ou WhatsApp do fornecedor."), () => toast && toast(txt)); } catch (e) { toast && toast(txt); }
+                  }} className="text-xs font-semibold inline-flex items-center gap-1" style={{ color: C.coral }}><Mail size={13} /> Copiar aviso para o fornecedor</button>
+                )}
+              </div>
+              <p className="text-xs mb-3" style={{ color: C.muted }}>Os de <b>envio automático</b> já foram liberados ao enviar a solicitação. Os demais: clique em <b>Enviar ao fornecedor</b> — ele baixa em "Acompanhar solicitação" (protocolo + CNPJ).</p>
               {r.docsEnviados && r.docsEnviados.length > 0 ? (
                 <div className="grid sm:grid-cols-2 gap-2">
                   {r.docsEnviados.map((d, i) => (
-                    <button key={i} onClick={() => abrirDoc(d, null)}
-                      className="flex items-center gap-2 rounded-xl border px-3 py-2.5 text-sm hover:bg-gray-50 text-left w-full" style={{ borderColor: C.line, color: C.text, opacity: d.url ? 1 : 0.7 }}>
-                      <span className="rounded-lg p-1.5 shrink-0" style={{ background: C.coralSoft, color: C.coral }}><FileIcon size={15} /></span>
-                      <span className="flex-1 min-w-0">
-                        <span className="font-medium truncate block">{d.nome}</span>
-                        <span className="text-[10px] font-semibold" style={{ color: d.automatico ? C.green : C.yellow }}>
-                          {d.foraDaRegra ? "Outra empresa gocase — não se aplica" : d.automatico ? "Enviado automaticamente" : d.url ? "Enviar ao fornecedor" : "Sem arquivo no acervo — enviar manualmente"}
-                        </span>
-                      </span>
-                      {d.url && <Download size={15} className="shrink-0" style={{ color: C.coral }} />}
-                    </button>
+                    <DocEnvioItem key={d.docId || i} d={d} acervo={acervo} interno={interno}
+                      onLiberar={(docId, arquivo) => onLiberarDoc(r.id, docId, arquivo)} onCancelar={(docId) => onCancelarEnvio(r.id, docId)} />
                   ))}
                 </div>
               ) : (
@@ -1490,7 +1566,6 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
               <div className="flex gap-3 flex-wrap">
                 <Btn icon={CheckCircle2} color={C.green}  onClick={() => openModal("aprovar")}>Aprovar</Btn>
                 <Btn icon={XCircle}     color={C.danger}   onClick={() => openModal("negar")}>Negar</Btn>
-                <Btn icon={AlertTriangle} variant="outline" color={C.yellow} onClick={() => openModal("ajuste")}>Solicitar ajuste</Btn>
                 {r.status === "APROVADA" && <Btn icon={Check} color={C.violet} onClick={() => openModal("concluir")}>Concluir</Btn>}
               </div>
               {/* Submissão setorial — apenas para solicitações de Cadastro */}
@@ -2300,12 +2375,15 @@ function LoadMore({ shown, total, onMore }) {
   );
 }
 
-/* Cartão de solicitação usado na visualização em cards (Kanban) */
-function KanbanCard({ r, nav }) {
+/* Cartão de solicitação usado na visualização em cards (Kanban). Pode ser arrastado
+   para outra coluna para mudar o status. */
+function KanbanCard({ r, nav, arrastavel }) {
   return (
     <button onClick={() => nav("detalhe", r.id)}
+      draggable={arrastavel}
+      onDragStart={e => { e.dataTransfer.setData("text/plain", r.id); e.dataTransfer.effectAllowed = "move"; }}
       className="w-full text-left rounded-xl border bg-white p-3 mb-2.5 hover:shadow-md transition"
-      style={{ borderColor: C.line }}>
+      style={{ borderColor: C.line, cursor: arrastavel ? "grab" : "pointer" }}>
       <div className="flex items-center justify-between gap-2 mb-1.5">
         <span className="font-mono text-xs font-bold" style={{ color: C.coral }}>{r.id}</span>
         <Pill {...SLA[r.sla]} />
@@ -2320,13 +2398,16 @@ function KanbanCard({ r, nav }) {
   );
 }
 
-/* Visualização em cards: quadro com uma coluna por status (estilo kanban) */
-function KanbanBoard({ rows, nav }) {
+/* Visualização em cards: quadro com uma coluna por status (estilo kanban). Com
+   `onMover`, os cards podem ser arrastados entre colunas. */
+function KanbanBoard({ rows, nav, onMover }) {
   const cols = Object.entries(STATUS);
+  const [alvo, setAlvo] = useState(null); // coluna sob o card arrastado
   return (
     <div className="flex gap-4 overflow-x-auto pb-2">
       {cols.map(([key, s]) => {
         const items = rows.filter(r => r.status === key);
+        const destacado = alvo === key;
         return (
           <div key={key} className="shrink-0 w-72">
             <div className="flex items-center gap-2 mb-3 px-1">
@@ -2334,10 +2415,14 @@ function KanbanBoard({ rows, nav }) {
               <span className="text-sm font-bold truncate" style={{ color: C.text }}>{s.label}</span>
               <span className="ml-auto text-xs font-bold rounded-full px-2 py-0.5 shrink-0" style={{ background: C.bg, color: C.muted }}>{items.length}</span>
             </div>
-            <div className="rounded-2xl p-2 min-h-[100px] max-h-[calc(100vh-300px)] overflow-y-auto" style={{ background: C.bg }}>
+            <div className="rounded-2xl p-2 min-h-[100px] max-h-[calc(100vh-300px)] overflow-y-auto transition"
+              style={{ background: destacado ? s.color + "22" : C.bg, outline: destacado ? `2px dashed ${s.color}` : "none" }}
+              onDragOver={onMover ? (e => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; if (alvo !== key) setAlvo(key); }) : undefined}
+              onDragLeave={onMover ? (e => { if (!e.currentTarget.contains(e.relatedTarget)) setAlvo(a => (a === key ? null : a)); }) : undefined}
+              onDrop={onMover ? (e => { e.preventDefault(); setAlvo(null); const id = e.dataTransfer.getData("text/plain"); if (id) onMover(id, key); }) : undefined}>
               {items.length === 0 ? (
-                <div className="text-xs text-center py-6" style={{ color: C.muted }}>Sem solicitações</div>
-              ) : items.map(r => <KanbanCard key={r.id} r={r} nav={nav} />)}
+                <div className="text-xs text-center py-6" style={{ color: C.muted }}>{destacado ? "Solte aqui" : "Sem solicitações"}</div>
+              ) : items.map(r => <KanbanCard key={r.id} r={r} nav={nav} arrastavel={!!onMover} />)}
             </div>
           </div>
         );
@@ -2368,7 +2453,7 @@ function ViewToggle({ viewMode, setViewMode }) {
   );
 }
 
-function IntLista({ nav, requests, tipo, titulo }) {
+function IntLista({ nav, requests, tipo, titulo, onMoverStatus }) {
   const [f, setF] = useState("Todos");
   const [viewMode, setViewMode] = useState("board"); // "board" (cards) | "list"
   const base = requests.filter(r => r.tipo === tipo);
@@ -2376,7 +2461,7 @@ function IntLista({ nav, requests, tipo, titulo }) {
   return (
     <div>
       <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
-        <h1 className="text-2xl font-bold" style={{ color: C.text }}>{titulo}</h1>
+        <div><h1 className="text-2xl font-bold" style={{ color: C.text }}>{titulo}</h1>{onMoverStatus && viewMode === "board" && <p className="text-xs" style={{ color: C.muted }}>Arraste os cards entre as colunas para mudar o status.</p>}</div>
         <ViewToggle viewMode={viewMode} setViewMode={setViewMode} />
       </div>
       <Card className="p-3 mb-4 flex items-center gap-2 flex-wrap">
@@ -2387,7 +2472,7 @@ function IntLista({ nav, requests, tipo, titulo }) {
         ))}
       </Card>
       {viewMode === "board" ? (
-        <KanbanBoard rows={rows} nav={nav} />
+        <KanbanBoard rows={rows} nav={nav} onMover={onMoverStatus} />
       ) : (
         <Card><DataTable rows={rows} cols={["Número", "Fornecedor", "UF", "Status", "SLA", "Responsável", ""]} onRow={r => nav("detalhe", r.id)} render={r => (
           <>
@@ -2922,7 +3007,7 @@ function AcervoDocs({ acervo, onAdd, onUpdate, onRemove, toast }) {
     ? docs.filter(d => [d.nome, d.descricao].filter(Boolean).some(v => String(v).toLowerCase().includes(buscaDocN)))
     : docs;
   const { paged: docsPaginados, more: maisDocs } = usePagedList(docsFiltrados, buscaDocN);
-  const vazio = { nome: "", descricao: "", link: "", arquivo: null, envioAutomatico: false };
+  const vazio = { nome: "", empresa: "", descricao: "", link: "", arquivo: null, envioAutomatico: false }; // nome = documento sem a empresa
   const [form, setForm] = useState(vazio);
   const [editId, setEditId] = useState(null);
   const [enviando, setEnviando] = useState(false);
@@ -2947,14 +3032,16 @@ function AcervoDocs({ acervo, onAdd, onUpdate, onRemove, toast }) {
   const limpar = () => { setForm(vazio); setEditId(null); setErr(""); };
 
   const salvar = () => {
-    const nome = form.nome.trim(), link = form.link.trim();
-    if (!nome) { setErr("Informe o nome do documento."); return; }
+    const documento = form.nome.trim(), link = form.link.trim(), empresa = form.empresa || "";
+    const nome = nomeComEmpresa(documento, empresa);
+    if (!documento) { setErr("Informe o nome do documento."); return; }
+    if (!editId && docs.some(d => (empresaDe(d) || "") === empresa && baseDe(d) === docBase(documento))) { setErr(`Já existe "${nome}" no acervo — edite o existente.`); return; }
     if (link && !linkValido(link)) { setErr("O link é opcional, mas se informado precisa ser uma URL completa (https://…)."); return; }
     if (form.envioAutomatico && !form.arquivo && !link) { setErr("Para envio automático, anexe o arquivo ou informe o link."); return; }
     const doc = {
       ...(editId ? docs.find(d => d.id === editId) : {}),
       id: editId || `doc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      nome, descricao: form.descricao.trim(), link, arquivo: form.arquivo, envioAutomatico: !!form.envioAutomatico,
+      nome, documento, empresa, descricao: form.descricao.trim(), link, arquivo: form.arquivo, envioAutomatico: !!form.envioAutomatico,
       // campos do formato antigo, mantidos para compatibilidade (url = arquivo ou link)
       tipo: form.arquivo ? "arquivo" : "link", url: form.arquivo ? form.arquivo.url : link,
       arquivoNome: form.arquivo ? form.arquivo.name : "", arquivoType: form.arquivo ? form.arquivo.type || "" : "",
@@ -2966,7 +3053,8 @@ function AcervoDocs({ acervo, onAdd, onUpdate, onRemove, toast }) {
 
   const editar = (d) => {
     const p = acervoPartes(d);
-    setForm({ nome: d.nome || "", descricao: d.descricao || "", link: p.link, arquivo: p.arquivo, envioAutomatico: !!d.envioAutomatico });
+    const emp = empresaDe(d) || "";
+    setForm({ nome: d.documento || (emp ? nomeSemEmpresa(d.nome) : d.nome || ""), empresa: emp, descricao: d.descricao || "", link: p.link, arquivo: p.arquivo, envioAutomatico: !!d.envioAutomatico });
     setEditId(d.id); setErr("");
     setTimeout(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
   };
@@ -2981,16 +3069,30 @@ function AcervoDocs({ acervo, onAdd, onUpdate, onRemove, toast }) {
     <div className="max-w-3xl">
       <h1 className="text-2xl font-bold" style={{ color: C.text }}>Acervo de documentos para cadastro</h1>
       <p className="text-sm mb-4" style={{ color: C.muted }}>
-        Documentos que o fornecedor pode pedir no cadastro. Basta o arquivo — o link do Drive é opcional. Os marcados com <b style={{ color: C.text }}>envio automático</b> ficam disponíveis para download assim que o fornecedor envia a solicitação; os demais a equipe envia depois da análise.
+        Documentos que o fornecedor pode pedir no cadastro. Basta o arquivo — o link do Drive é opcional. Informe a <b style={{ color: C.text }}>empresa</b> (BB Indústria ou Go Comércio): o fornecedor recebe só a versão da empresa que se aplica a ele (isento de IE ou Gift → Go; com IE → BB). Os marcados com <b style={{ color: C.text }}>envio automático</b> ficam disponíveis para download assim que o fornecedor envia a solicitação; os demais a equipe envia depois da análise.
       </p>
 
       <div ref={formRef} />
       <Card className="p-5 mb-4" style={editId ? { borderColor: C.coral } : undefined}>
         <h2 className="font-bold mb-3" style={{ color: C.text }}>{editId ? "Editar documento" : "Adicionar documento"}</h2>
         <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Nome do documento" value={form.nome} onChange={setCampo("nome")} />
-          <Field label="Descrição (opcional)" value={form.descricao} onChange={setCampo("descricao")} />
+          <Field label="Documento (sem o nome da empresa, ex.: Cartão CNPJ)" value={form.nome} onChange={setCampo("nome")} />
+          <div>
+            <label className="text-xs font-semibold" style={{ color: C.muted }}>Empresa gocase</label>
+            <select value={form.empresa} onChange={setCampo("empresa")} className="mt-1 w-full rounded-xl border px-3 py-2 text-sm bg-white" style={{ borderColor: C.line }}>
+              <option value="bb">BB Indústria</option>
+              <option value="go">Go Comércio</option>
+              <option value="">Nenhuma (vale para as duas)</option>
+            </select>
+          </div>
+          <Field label="Descrição (opcional)" value={form.descricao} onChange={setCampo("descricao")} full />
         </div>
+        {form.nome.trim() && (
+          <p className="text-[11px] mt-2" style={{ color: C.muted }}>
+            Nome no acervo: <b style={{ color: C.text }}>{nomeComEmpresa(form.nome.trim(), form.empresa)}</b>
+            {form.empresa && " — forma par com o mesmo documento da outra empresa."}
+          </p>
+        )}
 
         <div className="mt-4">
           <div className="text-xs font-semibold mb-1" style={{ color: C.muted }}>Arquivo</div>
@@ -3071,6 +3173,15 @@ function AcervoDocs({ acervo, onAdd, onUpdate, onRemove, toast }) {
                       )}
                       {p.link && !linkOk && <span className="font-semibold" style={{ color: C.yellow }}>⚠ link inválido (opcional) — edite ou remova</span>}
                       {vazioDoc && <span className="font-semibold" style={{ color: C.muted }}>sem arquivo — a equipe envia manualmente</span>}
+                      {(() => {
+                        const emp = empresaDe(d), outra = emp === "bb" ? "go" : emp === "go" ? "bb" : null;
+                        if (!outra) return null;
+                        const temPar = docs.some(o => o.id !== d.id && empresaDe(o) === outra && baseDe(o) === baseDe(d));
+                        return temPar
+                          ? <span className="font-semibold" style={{ color: C.green }}>✓ par {EMPRESA_NOME[outra]}</span>
+                          : <button onClick={() => { setForm({ ...vazio, nome: d.documento || nomeSemEmpresa(d.nome), empresa: outra, descricao: "" }); setEditId(null); setErr(""); setTimeout(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0); }}
+                              className="font-semibold hover:underline" style={{ color: C.yellow }}>+ criar versão {EMPRESA_NOME[outra]}</button>;
+                      })()}
                     </div>
                   </div>
                   <button onClick={() => alternarAuto(d)} title={d.envioAutomatico ? "Envio automático ativo (clique para desativar)" : "Envio pela equipe (clique para ativar o envio automático)"}
@@ -3195,8 +3306,9 @@ export default function App() {
     db.saveNotification(notif);
   };
 
-  const confirmModal = (status, obs) => {
-    const req = requests.find(r => r.id === selId);
+  // Muda o status de uma solicitação (modal de ação ou arrastando o card no quadro).
+  const confirmModal = (status, obs, reqId = selId) => {
+    const req = requests.find(r => r.id === reqId);
     const now = Date.now();
     const nowStr = new Date(now).toLocaleString("pt-BR");
     const isFinal = ["CONCLUIDA", "NEGADA"].includes(status);
@@ -3220,11 +3332,11 @@ export default function App() {
         status,
         ultimaAtualiz: nowStr,
         ultimaAtualizTs: now,
-        ...(isFinal ? { finalizadoTs: now } : {}),
+        finalizadoTs: isFinal ? now : undefined,
         resp: req.resp === "—" ? (currentUser?.name || "Equipe gocase") : req.resp,
         movimentos: [...(req.movimentos || []), mover],
       };
-      setRequests(rs => rs.map(r => r.id === selId ? updated : r));
+      setRequests(rs => rs.map(r => r.id === reqId ? updated : r));
       db.saveRequest(updated);
     }
 
@@ -3244,6 +3356,48 @@ export default function App() {
         : `${req.id} atualizada para "${STATUS[status]?.label}" por ${currentUser?.name || "Equipe gocase"}.`;
       pushNotif({ message: msgInterna, requestId: req.id, color: cor, audience: "interno" });
     }
+  };
+
+  // Envio manual de um documento do acervo ao fornecedor (ou de um arquivo anexado no chamado).
+  // O fornecedor baixa em "Acompanhar solicitação"; o token de entrega é criado no 1º envio.
+  const novoTokenEntrega = () => Array.from(crypto.getRandomValues(new Uint8Array(24)), b => b.toString(16).padStart(2, "0")).join("");
+  const atualizarDocEnviado = (reqId, docId, mudar, texto) => {
+    const req = requests.find(r => r.id === reqId);
+    if (!req) return;
+    const now = Date.now();
+    const docsEnviados = (req.docsEnviados || []).map(d => d.docId === docId ? mudar(d) : d);
+    const item = docsEnviados.find(d => d.docId === docId);
+    const updated = {
+      ...req, docsEnviados, entregaToken: req.entregaToken || novoTokenEntrega(),
+      ultimaAtualiz: new Date(now).toLocaleString("pt-BR"), ultimaAtualizTs: now,
+      movimentos: [...(req.movimentos || []), { status: req.status, actor: "user", who: currentUser?.name || "Equipe gocase", ts: now, text: texto(item) }],
+    };
+    setRequests(rs => rs.map(r => r.id === reqId ? updated : r));
+    db.saveRequest(updated);
+    return item;
+  };
+  const liberarDoc = async (reqId, docId, arquivo) => {
+    const item = atualizarDocEnviado(reqId, docId,
+      d => ({ ...d, liberado: true, liberadoTs: Date.now(), liberadoPor: currentUser?.name || "Equipe gocase", ...(arquivo ? { arquivoEnviado: arquivo } : {}) }),
+      d => `Documento "${d.nome}" enviado ao fornecedor${arquivo ? ` (arquivo ${arquivo.name})` : ""}.`);
+    if (item) toast(`"${item.nome}" liberado — o fornecedor baixa em Acompanhar solicitação.`);
+  };
+  const cancelarEnvio = (reqId, docId) => {
+    const item = atualizarDocEnviado(reqId, docId,
+      ({ liberado, liberadoTs, liberadoPor, arquivoEnviado, ...d }) => d,
+      d => `Envio do documento "${d.nome}" cancelado.`);
+    if (item) toast(`Envio de "${item.nome}" cancelado.`);
+  };
+
+  // Arrastar um card para outra coluna do quadro: status que pedem informação abrem o
+  // modal da ação correspondente; os demais mudam direto.
+  const MODAL_DO_STATUS = { APROVADA: "aprovar", NEGADA: "negar", AGUARDANDO: "ajuste", CONCLUIDA: "concluir", JURIDICO: "juridico", FISCAL: "fiscal", FINANCEIRO: "financeiro" };
+  const moverStatus = (reqId, status) => {
+    const req = requests.find(r => r.id === reqId);
+    if (!req || req.status === status) return;
+    setSelId(reqId);
+    if (MODAL_DO_STATUS[status]) setModal(MODAL_DO_STATUS[status]);
+    else confirmModal(status, "", reqId);
   };
 
   const Fonts = () => <style>{`
@@ -3304,10 +3458,10 @@ export default function App() {
   };
   const reopenRequest = () => { };
 
-  if (view === "detalhe") screen = <Detalhe r={selected} back={() => nav("lista-cad")} interno openModal={setModal} currentUser={currentUser} onSendMsg={sendChatMsg} onReopenRequest={reopenRequest} />;
+  if (view === "detalhe") screen = <Detalhe r={selected} back={() => nav("lista-cad")} interno openModal={setModal} currentUser={currentUser} onSendMsg={sendChatMsg} onReopenRequest={reopenRequest} acervo={acervo} onLiberarDoc={liberarDoc} onCancelarEnvio={cancelarEnvio} toast={toast} />;
   else if (view === "cliente") screen = <ClienteDetalhe nome={selId} requests={requests} users={users} nav={nav} />;
   else {
-    screen = { dash: <IntDash nav={nav} requests={requests} />, "lista-cad": <IntLista nav={nav} requests={requests} tipo="Cadastro" titulo="Solicitações de Cadastro" />, clientes: <Clientes requests={requests} users={users} nav={nav} />, acervo: (["ADMIN", "GESTOR"].includes(currentUser?.role) ? <AcervoDocs acervo={acervo} onAdd={addAcervoDoc} onUpdate={updateAcervoDoc} onRemove={removeAcervoDoc} toast={toast} /> : <IntDash nav={nav} requests={requests} />), usuarios: <Usuarios toast={toast} users={users} currentUser={currentUser} onAddUser={addUser} onUpdateUser={updateUser} onDeleteUser={removeUser} />, relatorios: <Relatorios toast={toast} requests={requests} />, config: <Config toast={toast} templates={templates} onSaveTemplates={saveTemplates} />, conta: <MinhaConta toast={toast} user={currentUser} /> }[view];
+    screen = { dash: <IntDash nav={nav} requests={requests} />, "lista-cad": <IntLista nav={nav} requests={requests} tipo="Cadastro" titulo="Solicitações de Cadastro" onMoverStatus={moverStatus} />, clientes: <Clientes requests={requests} users={users} nav={nav} />, acervo: (["ADMIN", "GESTOR"].includes(currentUser?.role) ? <AcervoDocs acervo={acervo} onAdd={addAcervoDoc} onUpdate={updateAcervoDoc} onRemove={removeAcervoDoc} toast={toast} /> : <IntDash nav={nav} requests={requests} />), usuarios: <Usuarios toast={toast} users={users} currentUser={currentUser} onAddUser={addUser} onUpdateUser={updateUser} onDeleteUser={removeUser} />, relatorios: <Relatorios toast={toast} requests={requests} />, config: <Config toast={toast} templates={templates} onSaveTemplates={saveTemplates} />, conta: <MinhaConta toast={toast} user={currentUser} /> }[view];
   }
 
   const visibleNotifs = notifications.filter(n => n.audience === "interno");
