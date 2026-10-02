@@ -6,35 +6,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 npm install      # instala dependências
-npm run dev      # servidor de desenvolvimento (Vite) — usa fallback localStorage (sem worker)
-npm run build    # build de produção em dist/
+npm run dev      # servidor de desenvolvimento (Vite) — modo local, usa localStorage (sem worker)
+npm run build    # build de produção em fornecedores/dist/
 ```
 
-Não há testes, linter ou formatador configurados. A UI e os textos são em português (pt-BR).
+Não há testes, linter ou formatador configurados. A UI e os textos são em português (pt-BR). (`npm run dev:fornecedores` / `npm run build:fornecedores` são apelidos dos mesmos comandos.)
 
-**Deploy (GoDeploy):** app `gocase-service-desk` (id `4ff9134d`). O cliente **precisa ser pré-buildado** (`npm run build`) — o bundler de cliente do GoDeploy (`client: [...]`) estoura o tempo com este SPA (react + recharts), então **não** publique a partir do `.jsx` cru; suba o `dist/`. O worker (`src/server.js`), por não ter dependências pesadas, compila instantaneamente no GoDeploy.
+**Deploy (GoDeploy):** app `gocase-cadastro-fornecedores` (id `e424e2ab`, visibilidade **pública** — a separação de acesso é feita no worker). O cliente **precisa ser pré-buildado** (`npm run build`) — o bundler de cliente do GoDeploy estoura o tempo com este SPA (react + recharts), então suba o `fornecedores/dist/`. O worker (`fornecedores/src/server.js`) compila instantaneamente no GoDeploy.
 
 Fluxo (numa máquina com Node):
 ```bash
-npm install && npm run build     # gera dist/index.html + dist/assets/*
+npm install && npm run build     # gera fornecedores/dist/index.html + fornecedores/dist/assets/*
 # 1) getUploadToken → { uploadToken, uploadUrl }
-# 2) subir dist/ (como index.html + assets/*) e o worker:
+# 2) subir o dist e o worker (os caminhos da esquerda são os publicados):
 curl -X POST -H "Authorization: Bearer $TOKEN" \
-  -F "index.html=@dist/index.html" \
-  -F "assets/<hash>.js=@dist/assets/<hash>.js" \
-  -F "src/server.js=@src/server.js" "$UPLOAD_URL"
-# 3) updateApp({ appId: "4ff9134d", uploadId, entrypoint: "src/server.js",
+  -F "index.html=@fornecedores/dist/index.html" \
+  -F "assets/<hash>.js=@fornecedores/dist/assets/<hash>.js" \
+  -F "src/server.js=@fornecedores/src/server.js" "$UPLOAD_URL"
+# 3) updateApp({ appId: "e424e2ab", uploadId, entrypoint: "src/server.js",
 #               assets: ["index.html", "assets/<hash>.js", ...] })
 ```
-Sem `assetConfig.not_found_handling: "single-page-application"` — o app não usa roteamento por URL, e o SPA-fallback sombrearia as rotas `/api/*`. Ver seção **Backend / banco de dados nativo**.
+Sem `assetConfig.not_found_handling: "single-page-application"` — o app não usa roteamento por URL, e o SPA-fallback sombrearia as rotas `/api/*`. Segredo do app: `SEED_ADMIN_PASSWORD` (senha inicial das contas de equipe — ver **Senhas**).
 
 > ⚠️ **Nunca faça deploy a partir de código não-mergeado.** O deploy no GoDeploy só acontece a partir da branch `main` já atualizada (após `git pull`) e com o PR da mudança **mergeado**. Ver seção **Fluxo de trabalho com Git**.
 
 ## Plataforma de Cadastro de Fornecedores (`fornecedores/`)
 
-Os processos de **cadastro/homologação de fornecedor** foram separados do Service Desk numa plataforma própria, com o mesmo layout e estilo: pasta `fornecedores/` (`index.html`, `src/App.jsx`, `src/main.jsx`, `src/server.js`, `vite.config.js`), publicada no GoDeploy como o app de slug **`gocase-cadastro-fornecedores`** (https://gocase-cadastro-fornecedores.devgogroup.com/), com **banco próprio** (outro `env.DB`, contas e solicitações independentes do Service Desk).
+Portal de **cadastro/homologação de fornecedores** da gocase: pasta `fornecedores/` (`index.html`, `src/App.jsx`, `src/main.jsx`, `src/server.js`, `vite.config.js`), publicada em https://gocase-cadastro-fornecedores.devgogroup.com/ com **banco próprio** (`env.DB`, SQLite do GoDeploy). O front-end está quase todo em `fornecedores/src/App.jsx` (seções demarcadas por `/* ===== ... ===== */`); o backend é `fornecedores/src/server.js`. Tailwind via CDN, ícones `lucide-react`, gráficos `recharts` (carregado sob demanda).
 
-- `fornecedores/src/App.jsx` nasceu de `src/App (1).jsx` sem RMA (sem Troca/Garantia, Histórico pós-venda, Manuais e Normas, pré-análise por IA nem relatórios de RMA).
+> **Histórico:** este repositório nasceu como Service Desk / RMA + Cadastro num só app. Em 10/2026 o Service Desk foi para o repositório [rodrigocosta-b2b/gocase-service-desk](https://github.com/rodrigocosta-b2b/gocase-service-desk) e o app GoDeploy `gocase-service-desk` (`4ff9134d`) passou para a Beatriz Nogueira. Aqui ficou só a plataforma de fornecedores.
+
+- `fornecedores/src/App.jsx` nasceu do `src/App (1).jsx` do Service Desk (hoje no repositório `gocase-service-desk`), sem RMA: sem Troca/Garantia, Histórico pós-venda, Manuais e Normas, pré-análise por IA nem relatórios de RMA.
 - **Dois acessos no mesmo app (público no GoDeploy):**
   - **Fornecedor — aberto, sem conta:** a página inicial é o formulário de Solicitação de Cadastro; obrigatórios: **CNPJ** (com validação dos dígitos), **e-mail do solicitante** (`emailSolicitante` — contato e chave de acompanhamento; pode ser diferente do e-mail do CNPJ na Receita, que fica em `dados.email`) e a IE. Ao digitar os 14 dígitos, `consultarCNPJ()` busca os dados na Receita Federal (CNPJá → CNPJ.ws → BrasilAPI, direto do navegador) e define a **Inscrição Estadual**: número (contribuinte), `ISENTO` (fonte confirma que não há IE ativa) ou "não verificada" (fornecedor preenche ou marca isento). Só o **CNPJ.ws** informa IE (o CNPJá aberto não traz) e ele limita ~3 consultas/min por IP. Há também "Acompanhar solicitação": basta **um** entre **e-mail do solicitante, CNPJ e protocolo** (com mais de um, todos precisam bater) — e-mail ou CNPJ listam as solicitações com os documentos liberados; só o protocolo mostra o status sem documentos (o protocolo é sequencial, então os documentos exigem e-mail ou CNPJ).
   - **Equipe — login e senha validados no servidor:** portal interno (Dashboard, Cadastros, Fornecedores, Acervo, Usuários, Relatórios, Configurações, Minha conta). Sessão em cookie HttpOnly `gcf_session` (12 h; o token também vai em `Authorization: Bearer`). Toda rota fora de `/api/public/*`, `/api/health`, `/api/login` e `/api/logout` devolve 401 sem sessão de equipe — inclusive `/api/files/:id`.
@@ -47,9 +49,6 @@ Os processos de **cadastro/homologação de fornecedor** foram separados do Serv
 - **Envio manual pela equipe:** no chamado, cada documento pedido tem "Enviar ao fornecedor" (usa o arquivo/link atual do acervo) ou "Anexar arquivo e enviar"; grava `docsEnviados[].liberado`, `liberadoTs`, `liberadoPor` e `arquivoEnviado`, cria o `entregaToken` se faltar e registra na linha do tempo. O fornecedor baixa em "Acompanhar solicitação" (com o CNPJ); "Cancelar envio" revoga na hora (a entrega pública usa `cache-control: no-store`). "Copiar aviso para o fornecedor" copia o texto com o link, protocolo e CNPJ. O botão "Solicitar ajuste" saiu do chamado.
 - **Quadro de Cadastros (Kanban):** os cards podem ser arrastados entre colunas (`moverStatus()` na raiz). Status que pedem informação (Aprovada, Negada, Aguardando, Concluída, setores) abrem o modal da ação; os demais mudam direto. Toda mudança passa por `confirmModal(status, obs, reqId)`, que registra movimento e notificação.
 - `fornecedores/src/server.js` documenta todas as rotas no cabeçalho.
-- Build e dev usam as dependências da raiz: `npm run build:fornecedores` (gera `fornecedores/dist/`) e `npm run dev:fornecedores` (modo local, `localStorage`).
-- Deploy: mesmo fluxo do Service Desk, subindo `fornecedores/dist/index.html` como `index.html`, `fornecedores/dist/assets/*` como `assets/*` e `fornecedores/src/server.js` como `src/server.js` (entrypoint), no app `e424e2ab` (`gocase-cadastro-fornecedores`, visibilidade **pública**).
-- O Service Desk (`4ff9134d`) **ainda não foi alterado**: a versão no ar (v39) tem funções cujo código-fonte não está neste repositório (manuais editáveis, recuperação de senha, busca de CNPJ no Datamart, zona de risco). Remover o Cadastro de lá depende de recuperar esse código. **Atenção:** o Service Desk é público e sua API não exige sessão (e as contas semeadas usam a senha que está neste repositório público) — a mesma proteção aplicada aqui deveria ser levada para lá.
 
 ## Fluxo de trabalho com Git (OBRIGATÓRIO)
 
@@ -101,51 +100,13 @@ npm install && npm run build            # ver seção Deploy (GoDeploy)
 4. O PR precisa estar **mergeado na `main`** antes de qualquer deploy no GoDeploy.
 5. Não versionar `node_modules/`, `dist/` nem segredos (`.env*`) — ver `.gitignore`.
 
-## Visão geral
 
-Service Desk / portal RMA da **gocase**: uma SPA React (Vite) para revendedores abrirem solicitações de **Troca/Garantia** (TG) e **Cadastro** de novos revendedores, e para a equipe interna gerenciá-las. É um app **full-stack no GoDeploy**: a SPA (front-end) conversa com um worker (`src/server.js`) que grava **todo registro no banco de dados nativo do GoDeploy** (SQLite, `env.DB`).
+## Arquitetura e convenções
 
-O front-end fica praticamente **todo em um único arquivo: `src/App.jsx`** (~3.000 linhas). `src/main.jsx` só monta o `<App/>`. O backend é o `src/server.js`. Tailwind vem via CDN em `index.html`; ícones de `lucide-react`; gráficos de `recharts`.
-
-O arquivo é organizado em seções demarcadas por comentários `/* ===== ... ===== */` — use-os para navegar (Brand tokens, Mock data, UI atoms, Contas & persistência, Login, Shell, SLA helpers, Detalhe, External screens, Internal screens, Modal, Histórico, Acervo, Root).
-
-## Arquitetura
-
-**Dois portais, um app.** O estado vive no componente `App()` (final do arquivo). `portal` é `"externo"` (revendedor) ou `"interno"` (equipe gocase); `view` é a tela atual. O roteamento é um switch manual no fim de `App()` que mapeia `view` → componente, com `nav(view, id)` trocando de tela. Telas do revendedor têm prefixo `Ext*` (`ExtInicio`, `ExtNovaTG`, `ExtNovaCad`, `ExtMinhas`); telas internas são `IntDash`, `IntLista`, `Clientes`, `Usuarios`, `Relatorios`, `Config`, etc.
-
-**Papéis.** `ADMIN`, `GESTOR`, `COLABORADOR` são internos (`isInterno()`); `CLIENTE` é externo. Só internos podem trocar para o portal interno. A aba "Acervo de documentos" é restrita a `ADMIN`/`GESTOR`.
-
-**Autenticação.** Login e cadastro são validados **no servidor** (`POST /api/login`, `POST /api/signup`); o cliente nunca recebe as senhas de outras contas (a API sempre devolve o usuário sem `password`). As senhas ainda são guardadas em texto puro no banco — é uma demo; hash/JWT ficam para depois. O gateway do GoDeploy já exige login Google (visibilidade `authenticated`) antes de a app carregar; o e-mail autenticado chega ao worker no header `X-Godeploy-User-Email` (disponível para escopo por usuário no futuro).
-
-**Persistência — banco nativo do GoDeploy (`env.DB`, SQLite).** Todo registro é gravado individualmente (uma linha por entidade, sem sobrescrever arrays inteiros) via o módulo `db` do `src/App.jsx`, que fala com a API do worker. O modo é detectado uma vez por sessão (`GET /api/health`): com worker → **remoto** (banco); sem worker (dev/preview) → **local** (`localStorage`, mesmas chaves antigas `gocase_*`). Hidratação inicial numa única chamada `GET /api/bootstrap`; se o banco está vazio, o cliente semeia `SEED_USERS`, `DEFAULT_TEMPLATES` e `DEFAULT_ACERVO`. `SEED`, `CLIENTES`, `USUARIOS`, `HISTORICO` seguem sendo mock só de tela.
-
-**Solicitações (requests)** têm `status` (ver constante `STATUS`), `sla` (`STATUS`/`SLA`), uma timeline de `movimentos`, e um `chat`. Ao mudar de status (`confirmModal`) o app registra o movimento, dispara notificações internas/externas e um e-mail-modelo. Uma nova mensagem do cliente em chamado finalizado **reabre** automaticamente o chamado (`reopenRequest`).
-
-**Notificações** ficam em um único array com `audience: "interno" | "externo"`; a filtragem por destinatário acontece na renderização (`visibleNotifs`).
-
-**Pré-análise por IA (regra simples):** no envio de uma TG (`ExtNovaTG`), o app compara a data de venda ao cliente final com hoje — se passou de **6 meses**, a solicitação já nasce `NEGADA` com `resp: "IA"`; caso contrário entra `EM_ANALISE`.
-
-**Tema:** um objeto de paleta **mutável** `C` é reescrito por `applyPalette()` a partir de `LIGHT`/`DARK`; `resolveTheme` trata `"auto"` (escuro das 18h às 6h). Ao editar cores, altere `LIGHT`/`DARK`, não `C`. Cores de marca (coral, yellow, cyan, violet, green) não mudam entre temas.
-
-## Backend / banco de dados nativo (GoDeploy)
-
-O worker `src/server.js` é o `entrypoint` do app no GoDeploy. O gateway serve os assets estáticos primeiro; o worker trata só as rotas `/api/*`. Todo dado mora no `env.DB` (SQLite nativo, até 10 GB, 2 MB por linha).
-
-**Tabelas** (criadas com `CREATE TABLE IF NOT EXISTS` no primeiro request): `users` (colunas reais: email, password, name, role, status, cnpj, telefone, contato), `requests` (id + colunas indexáveis owner_email/status/tipo/updated_ts + `payload` JSON com o objeto completo), `notifications` (id + audience/for_user_email/read/ts + `payload`), `acervo` (id + `payload`), `kv` (singletons, ex.: `templates`), `files` + `file_chunks` (arquivos em pedaços base64 de ≤700 KB por linha).
-
-**Endpoints:** `GET /api/health`, `GET /api/bootstrap`, `POST /api/login`, `POST /api/signup`, `GET/POST /api/users`, `PATCH /api/users/:email`, `PUT /api/requests/:id`, `POST /api/notifications`, `POST /api/notifications/read`, `PUT /api/templates`, `GET /api/acervo` + `PUT`/`DELETE /api/acervo/:id`, `POST /api/files`, `GET /api/files/:id[?download=1]`.
-
-**Arquivos (imagens, vídeos, PDFs).** `db.uploadFile()` no cliente envia o arquivo para `POST /api/files`; o worker guarda os bytes (base64 em pedaços) e devolve uma URL própria `/api/files/:id`. Anexos passam a carregar só a referência `{ id, name, type, size, url }` — nada de base64 inflando o JSON das solicitações. `GET /api/files/:id` responde com o `Content-Type` certo e `Content-Disposition: inline`, então o **visualizador embutido** (`DocViewer` + `abrirDoc`) abre imagens/vídeos/PDF **dentro da página** (sem nova aba). Links externos (Drive) não são embutíveis (X-Frame-Options) e caem no botão "abrir em nova aba".
-
-**Padrão ao editar dados:** cada mutação atualiza o estado React e persiste a entidade tocada (`db.saveRequest`, `db.saveNotification`, `db.saveUser`/`db.updateUser`, `db.markNotifsRead`, `db.saveAcervoDoc`, `db.saveTemplates`). Não há mais gravação do array inteiro. Ao criar um endpoint/tabela novo, adicione o método correspondente no módulo `db` (com o ramo de fallback `localStorage`) e a rota no `src/server.js`.
-
-## Integrações externas (opt-in)
-
-- **E-mail:** `notifyEmail()` faz POST em `${NOTIFY_API}/api/notify`. `NOTIFY_API` está vazio por padrão (e-mails desativados, só notificação interna) — preencha com a URL do backend para ativar. Chaves de terceiros (SMTP, tokens) devem ir por `setAppSecret` (lidas do worker em `env.*`), **nunca** no código do cliente.
-- **Consulta de CNPJ:** no cadastro, tenta em sequência `open.cnpja.com`, `cnpj.ws` e BrasilAPI (fallback), retornando o primeiro que responder; nunca lança erro.
-
-## Convenções
-
-- Ao adicionar uma tela, crie o componente e registre-o no switch de `view` dentro de `App()`; navegue com `nav()`.
-- Estilização é utilitária (Tailwind) + `style={{ color: C.x }}` para cores do tema. Componentes-átomo reutilizáveis: `Pill`, `Card`, `StatCard`, `Btn`, `Field`, `FileUpload`.
-- Anexos/uploads vão para o banco nativo via `db.uploadFile()` e são referenciados por `/api/files/:id` — não guarde mais base64 dentro do objeto da solicitação. Para abrir um documento use `abrirDoc(refOuUrl)` (abre no `DocViewer` embutido), nunca `window.open`/`<a target="_blank">`.
+- **Raiz `App()`** (fim de `App.jsx`): sem sessão mostra o acesso público (`PublicShell` → `ExtNovaCad` / `ConsultaStatus` / `Login`); com sessão de equipe mostra o `Shell` do portal interno. `view` é a tela atual e `nav(view, id)` troca de tela — ao criar uma tela, registre-a no mapa de `view` do `App()` e no `MENU.interno`.
+- **Persistência:** módulo `db` do `App.jsx` fala com o worker. O modo é detectado uma vez (`GET /api/health`): com worker → remoto; sem worker (dev/preview) → `localStorage` (chaves `gocase_forn_*`). Cada mutação atualiza o estado React e persiste só a entidade tocada (`db.saveRequest`, `db.saveAcervoDoc`, …). Ao criar rota nova, adicione o método no `db` (com o ramo local) e a rota no `server.js` — e decida se é pública (`/api/public/*`) ou de equipe.
+- **Arquivos:** `db.uploadFile()` (equipe) e `db.uploadPublicFile()` (formulário) guardam o arquivo no banco e devolvem `{ id, name, type, size, url: "/api/files/:id" }`; não guarde base64 no objeto da solicitação. Para abrir um documento use `abrirDoc(refOuUrl)` (visualizador embutido `DocViewer`), nunca `window.open`.
+- **Tema:** paleta mutável `C` reescrita por `applyPalette()` a partir de `LIGHT`/`DARK` (altere essas, não `C`); `resolveTheme` trata `"auto"`.
+- **Estilo:** Tailwind utilitário + `style={{ color: C.x }}`. Átomos: `Pill`, `Card`, `StatCard`, `Btn`, `Field`, `FileUpload`.
+- **E-mail:** `notifyEmail()` só funciona com `NOTIFY_API` preenchido (vazio por padrão). Chaves de terceiros vão por `setAppSecret`, nunca no cliente.
+- **Teste local de ponta a ponta:** sem wrangler; dá para rodar o worker real sobre SQLite com `sql.js` num servidor Node simples que serve `fornecedores/dist/` e encaminha `/api/*` para o `fetch` do `server.js`.

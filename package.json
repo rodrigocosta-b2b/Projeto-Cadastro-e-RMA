@@ -1,10 +1,10 @@
 {
-  "name": "gocase-rma",
+  "name": "gocase-cadastro-fornecedores",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "build": "vite build",
-    "dev": "vite",
+    "build": "vite build --config fornecedores/vite.config.js",
+    "dev": "vite --config fornecedores/vite.config.js",
     "build:fornecedores": "vite build --config fornecedores/vite.config.js",
     "dev:fornecedores": "vite --config fornecedores/vite.config.js"
   },
