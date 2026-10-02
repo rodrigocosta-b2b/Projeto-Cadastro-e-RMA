@@ -539,7 +539,7 @@ const db = {
       abertura: fmtDataBR(now), aberturaTs: now.getTime(), prazo: fmtDataBR(new Date(now.getTime() + 7 * 86400000)),
       ultimaAtualiz: now.toLocaleString("pt-BR"), ultimaAtualizTs: now.getTime(),
       parceiro: d.nomeFantasia || d.razaoSocial || `CNPJ ${payload.cnpj}`, cnpj: payload.cnpj, uf: d.estado || "—",
-      email: d.email || "", ie: d.inscricaoEstadual || "", ownerEmail: (d.email || "").toLowerCase(), dados: d,
+      email: payload.emailSolicitante || d.email || "", emailSolicitante: (payload.emailSolicitante || "").toLowerCase(), ie: d.inscricaoEstadual || "", ownerEmail: (payload.emailSolicitante || "").toLowerCase(), dados: d,
       produto: "—", modelo: "—", nf: "—", venda: "—",
       problema: payload.mensagem || "Solicitação de cadastro / homologação de parceiro.", mensagemCadastro: payload.mensagem || "",
       anexos: (payload.anexos || []).map(({ preview, ...a }) => a),
@@ -552,20 +552,21 @@ const db = {
     _ls.upsert(NOTIF_KEY, { id: `n-${Date.now()}`, ts: Date.now(), read: false, audience: "interno", requestId: id, color: C.cyan, message: `Nova solicitação de cadastro recebida (${id}) de ${req.parceiro}.` }, "id");
     return { ok: true, id, abertura: req.abertura, prazo: req.prazo, entregues: _entregaLocal(req) };
   },
-  // Acompanhamento: basta o protocolo OU o CNPJ (mesma regra do servidor). Devolve
-  // { resultados: [...] } ou null; sem CNPJ não vêm documentos (o protocolo é sequencial).
-  async publicStatus(id, cnpj) {
+  // Acompanhamento: basta UM entre e-mail do solicitante, CNPJ e protocolo (mesma regra
+  // do servidor). Devolve { resultados: [...] } ou null; só com o protocolo não vêm documentos.
+  async publicStatus(id, cnpj, email) {
     if ((await dbMode()) === "remote") {
       try {
-        const r = await apiJSON("GET", `/api/public/status?id=${encodeURIComponent(id || "")}&cnpj=${encodeURIComponent(cnpj || "")}`);
+        const qs = `id=${encodeURIComponent(id || "")}&cnpj=${encodeURIComponent(cnpj || "")}&email=${encodeURIComponent(email || "")}`;
+        const r = await apiJSON("GET", `/api/public/status?${qs}`);
         if (r.ok) return await r.json();
       } catch (e) { }
       return null;
     }
-    const d = String(cnpj || "").replace(/\D/g, ""), p = String(id || "").trim().toUpperCase();
-    const achados = (_ls.get(REQ_KEY, []) || []).filter(x => (!p || x.id === p) && (!d || String(x.cnpj || "").replace(/\D/g, "") === d));
+    const d = String(cnpj || "").replace(/\D/g, ""), p = String(id || "").trim().toUpperCase(), m = String(email || "").trim().toLowerCase();
+    const achados = (_ls.get(REQ_KEY, []) || []).filter(x => (!p || x.id === p) && (!d || String(x.cnpj || "").replace(/\D/g, "") === d) && (!m || (x.emailSolicitante || x.ownerEmail || "").toLowerCase() === m));
     if (!achados.length) return null;
-    return { resultados: achados.map(r => ({ id: r.id, status: r.status, abertura: r.abertura, prazo: r.prazo, ultimaAtualiz: r.ultimaAtualiz || r.abertura, ...(d ? { entregues: _entregaLocal(r) } : { documentosComCnpj: true }) })) };
+    return { resultados: achados.map(r => ({ id: r.id, status: r.status, abertura: r.abertura, prazo: r.prazo, ultimaAtualiz: r.ultimaAtualiz || r.abertura, ...(d || m ? { entregues: _entregaLocal(r) } : { documentosComCnpj: true }) })) };
   },
   // Base de clientes gocase (Datamart / Reseller) — só para a equipe logada.
   async resellerLookup(cnpj) {
@@ -704,6 +705,7 @@ function cnpjValido(v) {
   };
   return dv(12) === Number(d[12]) && dv(13) === Number(d[13]);
 }
+const emailValido = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(e || "").trim()); // igual ao worker
 const fmtCnpjInput = (v) => {
   const d = String(v || "").replace(/\D/g, "").slice(0, 14);
   return d.replace(/^(\d{2})(\d)/, "$1.$2").replace(/^(\d{2})\.(\d{3})(\d)/, "$1.$2.$3").replace(/\.(\d{3})(\d)/, ".$1/$2").replace(/(\d{4})(\d)/, "$1-$2");
@@ -908,24 +910,28 @@ function PublicShell({ view, setView, themePref, onCycleTheme, children }) {
   );
 }
 
-// Consulta pública do andamento: basta o protocolo OU o CNPJ. Só com o CNPJ aparecem
-// todas as solicitações da empresa e os documentos liberados (não mostra outros dados).
+// Consulta pública do andamento: basta UM entre e-mail do solicitante, CNPJ e protocolo
+// (com mais de um, todos precisam bater). E-mail ou CNPJ trazem todas as solicitações e
+// os documentos liberados; só o protocolo mostra o status (não mostra outros dados).
 function ConsultaStatus() {
   const [id, setId] = useState("");
   const [cnpj, setCnpj] = useState("");
+  const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
   const [res, setRes] = useState(null);
   const [err, setErr] = useState("");
   const consultar = async () => {
-    const temId = !!id.trim(), temCnpj = !!cnpj.replace(/\D/g, "");
-    if (!temId && !temCnpj) { setErr("Informe o protocolo ou o CNPJ da empresa."); return; }
+    const temId = !!id.trim(), temCnpj = !!cnpj.replace(/\D/g, ""), temEmail = !!email.trim();
+    if (!temId && !temCnpj && !temEmail) { setErr("Informe o seu e-mail, o CNPJ da empresa ou o protocolo."); return; }
     if (temCnpj && !cnpjValido(cnpj)) { setErr("CNPJ inválido — confira os dígitos."); return; }
+    if (temEmail && !emailValido(email)) { setErr("E-mail inválido — confira o endereço."); return; }
     setErr(""); setLoading(true);
-    const r = await db.publicStatus(id.trim(), temCnpj ? cnpj : "");
+    const r = await db.publicStatus(id.trim(), temCnpj ? cnpj : "", temEmail ? email.trim() : "");
     setLoading(false);
     if (!r || !r.resultados?.length) {
       setRes(null);
-      setErr(temId && temCnpj ? "Não encontramos uma solicitação com esse protocolo e CNPJ." : temId ? "Não encontramos uma solicitação com esse protocolo." : "Não encontramos solicitações para esse CNPJ.");
+      const usados = [temEmail && "e-mail", temCnpj && "CNPJ", temId && "protocolo"].filter(Boolean);
+      setErr(`Não encontramos solicitações com ${usados.length > 1 ? `esses dados (${usados.join(" + ")})` : `esse ${usados[0]}`}.`);
       return;
     }
     setRes(r.resultados);
@@ -934,16 +940,17 @@ function ConsultaStatus() {
     <div>
       <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Fornecedor</div>
       <h1 className="text-2xl font-bold" style={{ color: C.text }}>Acompanhar solicitação</h1>
-      <p className="text-sm mb-5" style={{ color: C.muted }}>Informe o protocolo <b style={{ color: C.text }}>ou</b> o CNPJ da empresa. Com o CNPJ você vê todas as solicitações da empresa e os documentos liberados.</p>
+      <p className="text-sm mb-5" style={{ color: C.muted }}>Basta preencher <b style={{ color: C.text }}>um</b> dos campos. Com o seu e-mail ou o CNPJ você vê todas as suas solicitações e os documentos liberados.</p>
       <Card className="p-5 mb-4">
-        <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Protocolo (opcional se informar o CNPJ)" value={id} onChange={e => setId(e.target.value.toUpperCase())} />
-          <Field label="CNPJ (opcional se informar o protocolo)" value={cnpj} onChange={e => setCnpj(fmtCnpjInput(e.target.value))} />
+        <div className="grid sm:grid-cols-3 gap-4">
+          <Field label="Seu e-mail (solicitante)" value={email} onChange={e => setEmail(e.target.value)} type="email" />
+          <Field label="CNPJ da empresa" value={cnpj} onChange={e => setCnpj(fmtCnpjInput(e.target.value))} />
+          <Field label="Protocolo" value={id} onChange={e => setId(e.target.value.toUpperCase())} />
         </div>
         {err && <div className="text-xs mt-3 font-semibold" style={{ color: C.danger }}>{err}</div>}
         <div className="mt-4"><Btn icon={loading ? Loader2 : Search} onClick={consultar}>{loading ? "Consultando…" : "Consultar"}</Btn></div>
       </Card>
-      {res && res.length > 1 && <p className="text-xs mb-2" style={{ color: C.muted }}>{res.length} solicitações encontradas para este CNPJ.</p>}
+      {res && res.length > 1 && <p className="text-xs mb-2" style={{ color: C.muted }}>{res.length} solicitações encontradas.</p>}
       {res && res.map(item => {
         const st = STATUS[item.status] || STATUS.NOVA;
         return (
@@ -958,7 +965,7 @@ function ConsultaStatus() {
                   <div key={k}><div className="text-xs" style={{ color: C.muted }}>{k}</div><div className="font-medium" style={{ color: C.text }}>{v || "—"}</div></div>
                 ))}
               </div>
-              {item.documentosComCnpj && <p className="text-xs mt-3" style={{ color: C.muted }}>Para ver os documentos liberados pela gocase, informe também o CNPJ da empresa.</p>}
+              {item.documentosComCnpj && <p className="text-xs mt-3" style={{ color: C.muted }}>Para ver os documentos liberados pela gocase, informe também o seu e-mail ou o CNPJ da empresa.</p>}
             </Card>
             {item.entregues && <DocsLiberados entregues={item.entregues} />}
           </div>
@@ -1491,7 +1498,8 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
                   ["Situação cadastral", d.situacao || "—"], ["UF", r.uf],
                   ["Contato", d.nomeContato || "—"], ["Telefone", d.telefone || "—"],
                   ...(r.empresaGocase ? [["Documentos da empresa", EMPRESA_NOME[r.empresaGocase] || r.empresaGocase]] : []),
-                  ["E-mail", r.email || "—"], ["Endereço", endereco || "—"],
+                  ["E-mail do solicitante", r.emailSolicitante || r.email || "—"], ["E-mail da empresa (Receita)", d.email || "—"],
+                  ["Endereço", endereco || "—"],
                 ];
               })().map(([k, v]) =>
                 <div key={k}><div className="text-xs" style={{ color: C.muted }}>{k}</div><div className="font-medium break-words" style={{ color: C.text }}>{v}</div></div>)}
@@ -1666,14 +1674,15 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [enviando, setEnviando] = useState(false);
-  const [erro, setErro] = useState("");
+  const [erro, setErro] = useState(""); // validação do passo
+  const [erroCnpj, setErroCnpj] = useState(""); // resultado da consulta do CNPJ (não apaga o erro do passo)
   const [consultado, setConsultado] = useState(false);
   const [ieStatus, setIeStatus] = useState(""); // contribuinte | isento | desconhecido
   const [fonte, setFonte] = useState("");
   const ieConsultadaRef = useRef(""); // IE que veio da consulta (restaurada ao desmarcar "isento")
   const [protocolo, setProtocolo] = useState(null);
   const vazio = {
-    cnpj: "", nomeContato: "", telefone: "", email: "",
+    cnpj: "", emailSolicitante: "", nomeContato: "", telefone: "", email: "",
     razaoSocial: "", nomeFantasia: "", inscricaoEstadual: "", situacao: "",
     cep: "", logradouro: "", bairro: "", municipio: "", estado: "", complemento: "",
   };
@@ -1708,16 +1717,17 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
 
   const localizar = async () => {
     const d = (f.cnpj || "").replace(/\D/g, "");
-    if (!cnpjValido(d)) { setErro("Informe um CNPJ válido (14 dígitos)."); return; }
-    setErro(""); setLoading(true);
+    if (!cnpjValido(d)) { setErroCnpj("Informe um CNPJ válido (14 dígitos)."); return; }
+    setErroCnpj(""); setLoading(true);
     const dados = await consultarCNPJ(d);
     setConsultado(true); setLoading(false);
+    setErro(e => (e.startsWith("Aguarde a consulta") ? "" : e));
     if (!dados) {
       setIeStatus("desconhecido"); setFonte("");
-      setErro("Não foi possível consultar o CNPJ agora. Você pode preencher os dados manualmente ou tentar de novo.");
+      setErroCnpj("Não foi possível consultar o CNPJ agora. Você pode preencher os dados manualmente ou tentar de novo.");
       return;
     }
-    setErro("");
+    setErroCnpj("");
     const { ieStatus: st, fonte: fnt, ...campos } = dados;
     setF(s => ({ ...s, ...campos, cnpj: s.cnpj }));
     setIeStatus(st); setFonte(fnt || "");
@@ -1742,6 +1752,7 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
 
   const avancar = () => {
     if (!cnpjOk) { setErro("Informe um CNPJ válido para continuar."); return; }
+    if (!emailValido(f.emailSolicitante)) { setErro("Informe o seu e-mail (solicitante) para contato e acompanhamento."); return; }
     if (!consultado) { setErro("Aguarde a consulta do CNPJ terminar."); if (!loading) localizar(); return; }
     // A IE define de qual empresa gocase (BB ou Go) são os documentos enviados.
     if (!f.inscricaoEstadual.trim()) { setErro("Informe a Inscrição Estadual ou marque \"Empresa isenta de IE\" para continuar."); return; }
@@ -1751,9 +1762,9 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
   const finalizar = async () => {
     if (enviando) return;
     setEnviando(true);
-    const { cnpj, ...dados } = f;
+    const { cnpj, emailSolicitante, ...dados } = f;
     const res = await db.submitCadastro({
-      cnpj,
+      cnpj, emailSolicitante: emailSolicitante.trim(),
       dados: { ...dados, fonte },
       mensagem: mensagem.trim(),
       anexos: meusDocs.map(({ preview, ...a }) => a),
@@ -1763,15 +1774,15 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
     });
     setEnviando(false);
     if (!res.ok) {
-      toast(res.reason === "invalid_cnpj" ? "CNPJ inválido. Confira o número." : "Não foi possível enviar agora. Tente novamente em instantes.");
+      toast(res.reason === "invalid_cnpj" ? "CNPJ inválido. Confira o número." : res.reason === "invalid_email" ? "E-mail do solicitante inválido. Confira no passo 1." : "Não foi possível enviar agora. Tente novamente em instantes.");
       return;
     }
-    setProtocolo({ id: res.id, abertura: res.abertura, prazo: res.prazo, cnpj, entregues: res.entregues || [], pendentes: selecionados.filter(d => !(res.entregues || []).some(e => e.id === d.id)).map(d => d.nome) });
+    setProtocolo({ id: res.id, abertura: res.abertura, prazo: res.prazo, cnpj, email: emailSolicitante.trim(), entregues: res.entregues || [], pendentes: selecionados.filter(d => !(res.entregues || []).some(e => e.id === d.id)).map(d => d.nome) });
   };
 
   const novaSolicitacao = () => {
     setF(vazio); setMeusDocs([]); setUploadKey(k => k + 1); setSolicitar({}); setLista(""); setMensagem("");
-    setConsultado(false); setIeStatus(""); setFonte(""); setErro(""); setProtocolo(null); setStep(1);
+    setConsultado(false); setIeStatus(""); setFonte(""); setErro(""); setErroCnpj(""); setProtocolo(null); setStep(1);
     ieConsultadaRef.current = "";
     autoRef.current = "";
   };
@@ -1787,7 +1798,7 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
         <div className="font-mono text-2xl font-bold mb-3" style={{ color: C.text }}>{protocolo.id}</div>
         <p className="text-sm max-w-md mx-auto" style={{ color: C.muted }}>
           A equipe de cadastro da gocase vai analisar sua solicitação até <b style={{ color: C.text }}>{protocolo.prazo}</b>.
-          Guarde o protocolo: com ele e o CNPJ ({protocolo.cnpj}) você acompanha o andamento.
+          Guarde o protocolo: com ele, com o CNPJ ({protocolo.cnpj}) ou com o seu e-mail ({protocolo.email}) você acompanha o andamento.
         </p>
         <div className="flex gap-2 justify-center mt-5 flex-wrap">
           <Btn icon={Search} onClick={goStatus}>Acompanhar solicitação</Btn>
@@ -1816,8 +1827,15 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
               </button>
             </div>
             {f.cnpj.replace(/\D/g, "").length === 14 && !cnpjOk && <div className="text-xs mt-2 font-semibold" style={{ color: C.danger }}>CNPJ inválido — confira os dígitos.</div>}
+            {erroCnpj && <div className="text-xs mt-2 font-semibold" style={{ color: C.danger }}>{erroCnpj}</div>}
             {erro && <div className="text-xs mt-2 font-semibold" style={{ color: C.danger }}>{erro}</div>}
             <p className="text-xs mt-2" style={{ color: C.muted }}>A busca é automática ao digitar os 14 dígitos: os dados vêm da Receita Federal, inclusive a Inscrição Estadual (ou se a empresa é isenta). Você pode ajustar qualquer campo depois.</p>
+            <div className="mt-4">
+              <label className="text-xs font-semibold" style={{ color: C.muted }}>Seu e-mail (solicitante) <span style={{ color: C.danger }}>*</span></label>
+              <input type="email" value={f.emailSolicitante} onChange={set("emailSolicitante")} placeholder="voce@empresa.com.br" autoComplete="email"
+                className="mt-1 w-full rounded-xl border px-3 py-2 text-sm bg-white" style={{ borderColor: f.emailSolicitante && !emailValido(f.emailSolicitante) ? C.danger : C.line }} />
+              <p className="text-xs mt-1" style={{ color: C.muted }}>É por ele que a equipe gocase fala com você — pode ser diferente do e-mail cadastrado no CNPJ. Também serve para acompanhar a solicitação.</p>
+            </div>
           </Card>
 
           {consultado && (
@@ -1849,7 +1867,7 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
                 <Field label="Situação cadastral" value={f.situacao} onChange={set("situacao")} />
                 <Field label="Nome do contato" value={f.nomeContato} onChange={set("nomeContato")} />
                 <Field label="Telefone" value={f.telefone} onChange={set("telefone")} />
-                <Field label="E-mail para retorno" value={f.email} onChange={set("email")} full />
+                <Field label="E-mail da empresa (cadastro na Receita)" value={f.email} onChange={set("email")} full />
                 <Field label="CEP" value={f.cep} onChange={set("cep")} />
                 <Field label="Logradouro" value={f.logradouro} onChange={set("logradouro")} />
                 <Field label="Bairro" value={f.bairro} onChange={set("bairro")} />
@@ -1973,7 +1991,7 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
           <Card className="p-5 mb-4">
             <div className="flex items-center gap-2 mb-3 text-sm font-semibold" style={{ color: C.green }}><CheckCircle2 size={16} /> Revisão final</div>
             <div className="grid sm:grid-cols-2 gap-3 text-sm">
-              {[["Empresa", f.nomeFantasia || f.razaoSocial || "—"], ["CNPJ", f.cnpj || "—"], ["Inscrição estadual", isento ? "Isento" : (f.inscricaoEstadual || "Não informada")], ["Município/UF", `${f.municipio || "—"}/${f.estado || "—"}`], ["Contato", f.nomeContato || "—"], ["E-mail", f.email || "—"]].map(([k, v]) => (
+              {[["Empresa", f.nomeFantasia || f.razaoSocial || "—"], ["CNPJ", f.cnpj || "—"], ["E-mail do solicitante", f.emailSolicitante || "—"], ["Inscrição estadual", isento ? "Isento" : (f.inscricaoEstadual || "Não informada")], ["Município/UF", `${f.municipio || "—"}/${f.estado || "—"}`], ["Contato", f.nomeContato || "—"], ["E-mail", f.email || "—"]].map(([k, v]) => (
                 <div key={k}><div className="text-xs" style={{ color: C.muted }}>{k}</div><div className="font-medium" style={{ color: C.text }}>{v}</div></div>
               ))}
             </div>
@@ -1989,12 +2007,6 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
               <div className="text-xs" style={{ color: C.muted }}>Documentos solicitados da gocase</div>
               <div className="font-medium" style={{ color: C.text }}>{selecionados.map(d => d.nome).join(", ") || "Nenhum"}</div>
             </div>
-            {!f.email.trim() && !f.telefone.trim() && (
-              <div className="mt-4 rounded-xl border px-3 py-2.5 text-xs flex items-start gap-2" style={{ borderColor: C.yellow + "66", background: C.yellow + "14", color: C.text }}>
-                <AlertTriangle size={14} className="mt-0.5 shrink-0" style={{ color: C.yellow }} />
-                Sem e-mail ou telefone, a equipe só consegue retornar pelo acompanhamento com o protocolo. Recomendamos informar um contato.
-              </div>
-            )}
           </Card>
           <div className="flex justify-between">
             <Btn variant="outline" color={C.muted} icon={ArrowLeft} onClick={() => setStep(2)}>Voltar</Btn>

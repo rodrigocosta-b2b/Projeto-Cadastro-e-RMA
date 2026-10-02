@@ -23,9 +23,9 @@
  *   GET    /api/health
  *   GET    /api/public/acervo                   → [{ id, nome, documento, empresa, descricao, envioAutomatico }] (sem links)
  *   POST   /api/public/files  {name,type,size,data(base64)} → { id, name, type, size, url }
- *   POST   /api/public/cadastro {cnpj, dados…}  → { id, abertura, prazo, entregues:[doc] }
- *   GET    /api/public/status?id=&cnpj=         → { resultados: [{ id, status, abertura, prazo, ultimaAtualiz, entregues? }] }
- *          Basta um dos dois: só CNPJ lista todas as solicitações da empresa (com documentos);
+ *   POST   /api/public/cadastro {cnpj, emailSolicitante, dados…} → { id, abertura, prazo, entregues:[doc] }
+ *   GET    /api/public/status?email=&cnpj=&id=  → { resultados: [{ id, status, abertura, prazo, ultimaAtualiz, entregues? }] }
+ *          Basta um dos três: e-mail do solicitante ou CNPJ listam as solicitações (com documentos);
  *          só protocolo mostra o status, sem documentos (o protocolo é sequencial).
  *   GET    /api/public/entrega/:token/:docId    → arquivo de um documento do acervo com
  *          "envio automático" ou enviado pela equipe nessa solicitação (token só vai para quem enviou).
@@ -139,6 +139,7 @@ function cnpjValido(d) {
   return dv(12) === Number(d[12]) && dv(13) === Number(d[13]);
 }
 const fmtCnpj = (d) => `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12, 14)}`;
+const emailValido = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(e || ""));
 // Datas no fuso de Brasília (o worker roda em UTC).
 const fmtBR = (ts) => new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(ts));
 const fmtBRFull = (ts) => new Date(ts).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
@@ -492,6 +493,9 @@ async function createCadastro(env, body) {
   for (const k of ["razaoSocial", "nomeFantasia", "inscricaoEstadual", "situacao", "nomeContato", "telefone", "email", "cep", "logradouro", "bairro", "municipio", "estado", "complemento", "fonte"]) dados[k] = str(d[k]);
   dados.estado = dados.estado.toUpperCase().slice(0, 2);
   const mensagem = str(body.mensagem, 4000);
+  // E-mail de quem está pedindo (pode não ser o e-mail do CNPJ na Receita): contato e chave de acompanhamento.
+  const emailSolicitante = lower(str(body.emailSolicitante, 200));
+  if (!emailValido(emailSolicitante)) return json({ error: "invalid_email" }, 400);
   const anexos = (Array.isArray(body.anexos) ? body.anexos : []).slice(0, 20)
     .filter((a) => a && /^\/api\/files\/f[0-9a-z]+$/.test(String(a.url || "")))
     .map((a) => ({ id: str(a.id, 60), name: str(a.name, 200), type: str(a.type, 100), size: Number(a.size) || 0, url: a.url }));
@@ -523,8 +527,9 @@ async function createCadastro(env, body) {
       abertura: fmtBR(now), aberturaTs: now, prazo: fmtBR(now + 7 * 86400000),
       ultimaAtualiz: fmtBRFull(now), ultimaAtualizTs: now,
       parceiro: dados.nomeFantasia || dados.razaoSocial || `CNPJ ${fmtCnpj(digits)}`,
-      cnpj: fmtCnpj(digits), uf: dados.estado || "—", email: dados.email, ie: dados.inscricaoEstadual,
-      ownerEmail: lower(dados.email),
+      cnpj: fmtCnpj(digits), uf: dados.estado || "—", email: emailSolicitante || dados.email, ie: dados.inscricaoEstadual,
+      emailSolicitante,
+      ownerEmail: emailSolicitante,
       dados,
       produto: "—", modelo: "—", nf: "—", venda: "—",
       problema: mensagem || "Solicitação de cadastro / homologação de parceiro.",
@@ -555,35 +560,39 @@ async function createCadastro(env, body) {
   return json({ error: "busy" }, 503);
 }
 
-/* Acompanhamento público: basta o protocolo OU o CNPJ.
- *  - só CNPJ        → todas as solicitações da empresa, com os documentos liberados;
- *  - só protocolo   → só o status (o protocolo é sequencial, então sem o CNPJ não
- *                     mostramos documentos — evita baixar arquivos "chutando" números);
- *  - os dois        → aquela solicitação, com os documentos.
+/* Acompanhamento público: basta UM entre e-mail do solicitante, CNPJ e protocolo
+ * (informando mais de um, todos precisam bater).
+ *  - e-mail ou CNPJ → todas as solicitações que batem, com os documentos liberados;
+ *  - só protocolo   → só o status (o protocolo é sequencial, então sem e-mail/CNPJ não
+ *                     mostramos documentos — evita baixar arquivos "chutando" números).
  * Nunca devolve dados cadastrais, mensagens ou anexos do fornecedor. */
-async function publicStatus(env, id, cnpj) {
+async function publicStatus(env, id, cnpj, email) {
   const protocolo = str(id, 40).toUpperCase();
   const digits = onlyDigits(cnpj);
-  if (!protocolo && !digits) return json({ error: "missing" }, 400);
+  const mail = lower(str(email, 200));
+  if (!protocolo && !digits && !mail) return json({ error: "missing" }, 400);
   if (digits && !cnpjValido(digits)) return json({ error: "invalid_cnpj" }, 400);
-  let reqs;
-  if (protocolo) {
-    const r = await env.DB.query("SELECT payload FROM requests WHERE id = ?", [protocolo]);
-    reqs = (r.rows || []).map((row) => parse(row.payload)).filter(Boolean);
-  } else {
-    const r = await env.DB.query(
-      "SELECT payload FROM requests WHERE json_extract(payload, '$.cnpj') IN (?, ?) ORDER BY updated_ts DESC LIMIT 30",
-      [fmtCnpj(digits), digits],
-    );
-    reqs = (r.rows || []).map((row) => parse(row.payload)).filter(Boolean);
-  }
-  if (digits) reqs = reqs.filter((req) => onlyDigits(req.cnpj) === digits);
+  if (mail && !emailValido(mail)) return json({ error: "invalid_email" }, 400);
+  let r;
+  if (protocolo) r = await env.DB.query("SELECT payload FROM requests WHERE id = ?", [protocolo]);
+  else if (mail) r = await env.DB.query(
+    "SELECT payload FROM requests WHERE owner_email = ? OR json_extract(payload, '$.emailSolicitante') = ? ORDER BY updated_ts DESC LIMIT 30",
+    [mail, mail],
+  );
+  else r = await env.DB.query(
+    "SELECT payload FROM requests WHERE json_extract(payload, '$.cnpj') IN (?, ?) ORDER BY updated_ts DESC LIMIT 30",
+    [fmtCnpj(digits), digits],
+  );
+  const reqs = (r.rows || []).map((row) => parse(row.payload)).filter(Boolean)
+    .filter((req) => !digits || onlyDigits(req.cnpj) === digits)
+    .filter((req) => !mail || lower(req.emailSolicitante || req.ownerEmail) === mail);
   if (!reqs.length) return json({ error: "not_found" }, 404);
+  const comDocs = !!(digits || mail);
   const resultados = [];
   for (const req of reqs) {
     resultados.push({
       id: req.id, status: req.status, abertura: req.abertura, prazo: req.prazo, ultimaAtualiz: req.ultimaAtualiz || req.abertura,
-      ...(digits ? { entregues: await entregaPublica(env, req) } : { documentosComCnpj: true }),
+      ...(comDocs ? { entregues: await entregaPublica(env, req) } : { documentosComCnpj: true }),
     });
   }
   return json({ resultados });
@@ -683,7 +692,7 @@ export default {
       }
 
       if (path === "/api/public/status" && method === "GET") {
-        return await publicStatus(env, url.searchParams.get("id") || "", url.searchParams.get("cnpj") || "");
+        return await publicStatus(env, url.searchParams.get("id") || "", url.searchParams.get("cnpj") || "", url.searchParams.get("email") || "");
       }
 
       if (path === "/api/login" && method === "POST") {
