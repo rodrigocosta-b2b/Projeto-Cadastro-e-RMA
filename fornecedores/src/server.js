@@ -24,7 +24,9 @@
  *   GET    /api/public/acervo                   → [{ id, nome, documento, empresa, descricao, envioAutomatico }] (sem links)
  *   POST   /api/public/files  {name,type,size,data(base64)} → { id, name, type, size, url }
  *   POST   /api/public/cadastro {cnpj, dados…}  → { id, abertura, prazo, entregues:[doc] }
- *   GET    /api/public/status?id=&cnpj=         → { id, status, abertura, prazo, ultimaAtualiz, entregues }
+ *   GET    /api/public/status?id=&cnpj=         → { resultados: [{ id, status, abertura, prazo, ultimaAtualiz, entregues? }] }
+ *          Basta um dos dois: só CNPJ lista todas as solicitações da empresa (com documentos);
+ *          só protocolo mostra o status, sem documentos (o protocolo é sequencial).
  *   GET    /api/public/entrega/:token/:docId    → arquivo de um documento do acervo com
  *          "envio automático" ou enviado pela equipe nessa solicitação (token só vai para quem enviou).
  *          Documentos sem envio automático só saem por aqui depois que a equipe clica em
@@ -553,14 +555,38 @@ async function createCadastro(env, body) {
   return json({ error: "busy" }, 503);
 }
 
+/* Acompanhamento público: basta o protocolo OU o CNPJ.
+ *  - só CNPJ        → todas as solicitações da empresa, com os documentos liberados;
+ *  - só protocolo   → só o status (o protocolo é sequencial, então sem o CNPJ não
+ *                     mostramos documentos — evita baixar arquivos "chutando" números);
+ *  - os dois        → aquela solicitação, com os documentos.
+ * Nunca devolve dados cadastrais, mensagens ou anexos do fornecedor. */
 async function publicStatus(env, id, cnpj) {
-  const r = await env.DB.query("SELECT payload FROM requests WHERE id = ?", [str(id, 40).toUpperCase()]);
-  const req = r.rows && r.rows[0] ? parse(r.rows[0].payload) : null;
-  if (!req || onlyDigits(req.cnpj) !== onlyDigits(cnpj)) return json({ error: "not_found" }, 404);
-  return json({
-    id: req.id, status: req.status, abertura: req.abertura, prazo: req.prazo, ultimaAtualiz: req.ultimaAtualiz || req.abertura,
-    entregues: await entregaPublica(env, req),
-  });
+  const protocolo = str(id, 40).toUpperCase();
+  const digits = onlyDigits(cnpj);
+  if (!protocolo && !digits) return json({ error: "missing" }, 400);
+  if (digits && !cnpjValido(digits)) return json({ error: "invalid_cnpj" }, 400);
+  let reqs;
+  if (protocolo) {
+    const r = await env.DB.query("SELECT payload FROM requests WHERE id = ?", [protocolo]);
+    reqs = (r.rows || []).map((row) => parse(row.payload)).filter(Boolean);
+  } else {
+    const r = await env.DB.query(
+      "SELECT payload FROM requests WHERE json_extract(payload, '$.cnpj') IN (?, ?) ORDER BY updated_ts DESC LIMIT 30",
+      [fmtCnpj(digits), digits],
+    );
+    reqs = (r.rows || []).map((row) => parse(row.payload)).filter(Boolean);
+  }
+  if (digits) reqs = reqs.filter((req) => onlyDigits(req.cnpj) === digits);
+  if (!reqs.length) return json({ error: "not_found" }, 404);
+  const resultados = [];
+  for (const req of reqs) {
+    resultados.push({
+      id: req.id, status: req.status, abertura: req.abertura, prazo: req.prazo, ultimaAtualiz: req.ultimaAtualiz || req.abertura,
+      ...(digits ? { entregues: await entregaPublica(env, req) } : { documentosComCnpj: true }),
+    });
+  }
+  return json({ resultados });
 }
 
 // Arquivo de um documento liberado (automático ou pela equipe), para quem tem o token da solicitação.
