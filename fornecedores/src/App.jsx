@@ -552,18 +552,20 @@ const db = {
     _ls.upsert(NOTIF_KEY, { id: `n-${Date.now()}`, ts: Date.now(), read: false, audience: "interno", requestId: id, color: C.cyan, message: `Nova solicitação de cadastro recebida (${id}) de ${req.parceiro}.` }, "id");
     return { ok: true, id, abertura: req.abertura, prazo: req.prazo, entregues: _entregaLocal(req) };
   },
-  // Status de uma solicitação pelo protocolo + CNPJ (não expõe outros dados).
+  // Acompanhamento: basta o protocolo OU o CNPJ (mesma regra do servidor). Devolve
+  // { resultados: [...] } ou null; sem CNPJ não vêm documentos (o protocolo é sequencial).
   async publicStatus(id, cnpj) {
     if ((await dbMode()) === "remote") {
       try {
-        const r = await apiJSON("GET", `/api/public/status?id=${encodeURIComponent(id)}&cnpj=${encodeURIComponent(cnpj)}`);
+        const r = await apiJSON("GET", `/api/public/status?id=${encodeURIComponent(id || "")}&cnpj=${encodeURIComponent(cnpj || "")}`);
         if (r.ok) return await r.json();
       } catch (e) { }
       return null;
     }
-    const d = String(cnpj || "").replace(/\D/g, "");
-    const r = (_ls.get(REQ_KEY, []) || []).find(x => x.id === String(id).trim().toUpperCase() && String(x.cnpj || "").replace(/\D/g, "") === d);
-    return r ? { id: r.id, status: r.status, abertura: r.abertura, prazo: r.prazo, ultimaAtualiz: r.ultimaAtualiz || r.abertura, entregues: _entregaLocal(r) } : null;
+    const d = String(cnpj || "").replace(/\D/g, ""), p = String(id || "").trim().toUpperCase();
+    const achados = (_ls.get(REQ_KEY, []) || []).filter(x => (!p || x.id === p) && (!d || String(x.cnpj || "").replace(/\D/g, "") === d));
+    if (!achados.length) return null;
+    return { resultados: achados.map(r => ({ id: r.id, status: r.status, abertura: r.abertura, prazo: r.prazo, ultimaAtualiz: r.ultimaAtualiz || r.abertura, ...(d ? { entregues: _entregaLocal(r) } : { documentosComCnpj: true }) })) };
   },
   // Base de clientes gocase (Datamart / Reseller) — só para a equipe logada.
   async resellerLookup(cnpj) {
@@ -906,7 +908,8 @@ function PublicShell({ view, setView, themePref, onCycleTheme, children }) {
   );
 }
 
-// Consulta pública do andamento: protocolo + CNPJ (não mostra nenhum outro dado).
+// Consulta pública do andamento: basta o protocolo OU o CNPJ. Só com o CNPJ aparecem
+// todas as solicitações da empresa e os documentos liberados (não mostra outros dados).
 function ConsultaStatus() {
   const [id, setId] = useState("");
   const [cnpj, setCnpj] = useState("");
@@ -914,41 +917,53 @@ function ConsultaStatus() {
   const [res, setRes] = useState(null);
   const [err, setErr] = useState("");
   const consultar = async () => {
-    if (!id.trim() || !cnpjValido(cnpj)) { setErr("Informe o número do protocolo e um CNPJ válido."); return; }
+    const temId = !!id.trim(), temCnpj = !!cnpj.replace(/\D/g, "");
+    if (!temId && !temCnpj) { setErr("Informe o protocolo ou o CNPJ da empresa."); return; }
+    if (temCnpj && !cnpjValido(cnpj)) { setErr("CNPJ inválido — confira os dígitos."); return; }
     setErr(""); setLoading(true);
-    const r = await db.publicStatus(id.trim(), cnpj);
+    const r = await db.publicStatus(id.trim(), temCnpj ? cnpj : "");
     setLoading(false);
-    if (!r) { setRes(null); setErr("Não encontramos uma solicitação com esse protocolo e CNPJ."); return; }
-    setRes(r);
+    if (!r || !r.resultados?.length) {
+      setRes(null);
+      setErr(temId && temCnpj ? "Não encontramos uma solicitação com esse protocolo e CNPJ." : temId ? "Não encontramos uma solicitação com esse protocolo." : "Não encontramos solicitações para esse CNPJ.");
+      return;
+    }
+    setRes(r.resultados);
   };
-  const st = res ? (STATUS[res.status] || STATUS.NOVA) : null;
   return (
     <div>
       <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Fornecedor</div>
       <h1 className="text-2xl font-bold" style={{ color: C.text }}>Acompanhar solicitação</h1>
-      <p className="text-sm mb-5" style={{ color: C.muted }}>Informe o protocolo recebido ao enviar o cadastro e o CNPJ da empresa.</p>
+      <p className="text-sm mb-5" style={{ color: C.muted }}>Informe o protocolo <b style={{ color: C.text }}>ou</b> o CNPJ da empresa. Com o CNPJ você vê todas as solicitações da empresa e os documentos liberados.</p>
       <Card className="p-5 mb-4">
         <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Protocolo" value={id} onChange={e => setId(e.target.value.toUpperCase())} />
-          <Field label="CNPJ" value={cnpj} onChange={e => setCnpj(fmtCnpjInput(e.target.value))} />
+          <Field label="Protocolo (opcional se informar o CNPJ)" value={id} onChange={e => setId(e.target.value.toUpperCase())} />
+          <Field label="CNPJ (opcional se informar o protocolo)" value={cnpj} onChange={e => setCnpj(fmtCnpjInput(e.target.value))} />
         </div>
         {err && <div className="text-xs mt-3 font-semibold" style={{ color: C.danger }}>{err}</div>}
         <div className="mt-4"><Btn icon={loading ? Loader2 : Search} onClick={consultar}>{loading ? "Consultando…" : "Consultar"}</Btn></div>
       </Card>
-      {res && (
-        <Card className="p-5">
-          <div className="flex items-center gap-3 flex-wrap mb-3">
-            <span className="font-mono text-lg font-bold" style={{ color: C.text }}>{res.id}</span>
-            <Pill label={st.label} color={st.color} />
+      {res && res.length > 1 && <p className="text-xs mb-2" style={{ color: C.muted }}>{res.length} solicitações encontradas para este CNPJ.</p>}
+      {res && res.map(item => {
+        const st = STATUS[item.status] || STATUS.NOVA;
+        return (
+          <div key={item.id} className="mb-4">
+            <Card className="p-5">
+              <div className="flex items-center gap-3 flex-wrap mb-3">
+                <span className="font-mono text-lg font-bold" style={{ color: C.text }}>{item.id}</span>
+                <Pill label={st.label} color={st.color} />
+              </div>
+              <div className="grid sm:grid-cols-3 gap-3 text-sm">
+                {[["Aberta em", item.abertura], ["Prazo de análise", item.prazo], ["Última atualização", item.ultimaAtualiz]].map(([k, v]) => (
+                  <div key={k}><div className="text-xs" style={{ color: C.muted }}>{k}</div><div className="font-medium" style={{ color: C.text }}>{v || "—"}</div></div>
+                ))}
+              </div>
+              {item.documentosComCnpj && <p className="text-xs mt-3" style={{ color: C.muted }}>Para ver os documentos liberados pela gocase, informe também o CNPJ da empresa.</p>}
+            </Card>
+            {item.entregues && <DocsLiberados entregues={item.entregues} />}
           </div>
-          <div className="grid sm:grid-cols-3 gap-3 text-sm">
-            {[["Aberta em", res.abertura], ["Prazo de análise", res.prazo], ["Última atualização", res.ultimaAtualiz]].map(([k, v]) => (
-              <div key={k}><div className="text-xs" style={{ color: C.muted }}>{k}</div><div className="font-medium" style={{ color: C.text }}>{v || "—"}</div></div>
-            ))}
-          </div>
-        </Card>
-      )}
-      {res && <DocsLiberados entregues={res.entregues || []} />}
+        );
+      })}
     </div>
   );
 }
