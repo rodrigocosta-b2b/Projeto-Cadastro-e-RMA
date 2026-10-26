@@ -575,7 +575,43 @@ const db = {
     const d = String(cnpj || "").replace(/\D/g, ""), p = String(id || "").trim().toUpperCase(), m = String(email || "").trim().toLowerCase();
     const achados = (_ls.get(REQ_KEY, []) || []).filter(x => (!p || x.id === p) && (!d || String(x.cnpj || "").replace(/\D/g, "") === d) && (!m || (x.emailSolicitante || x.ownerEmail || "").toLowerCase() === m));
     if (!achados.length) return null;
-    return { resultados: achados.map(r => ({ id: r.id, status: r.status, abertura: r.abertura, prazo: r.prazo, ultimaAtualiz: r.ultimaAtualiz || r.abertura, ...(d || m ? { entregues: _entregaLocal(r) } : { documentosComCnpj: true }) })) };
+    const acessoLocal = (r) => {
+      if (!r.acessoToken) { r.acessoToken = Array.from(crypto.getRandomValues(new Uint8Array(24)), b => b.toString(16).padStart(2, "0")).join(""); _ls.upsert(REQ_KEY, r, "id"); }
+      return r.acessoToken;
+    };
+    return { resultados: achados.map(r => ({ id: r.id, status: r.status, abertura: r.abertura, prazo: r.prazo, ultimaAtualiz: r.ultimaAtualiz || r.abertura, ...(d || m ? { entregues: _entregaLocal(r), acesso: acessoLocal(r) } : { documentosComCnpj: true }) })) };
+  },
+  // Chamado aberto ao fornecedor (status, chat e documentos liberados), pelo `acesso`
+  // que vem na consulta por e-mail/CNPJ. null se o acesso não vale.
+  async publicChamado(acesso) {
+    if ((await dbMode()) === "remote") {
+      try { const r = await apiJSON("GET", `/api/public/chamado/${encodeURIComponent(acesso)}`); if (r.ok) return await r.json(); } catch (e) { }
+      return null;
+    }
+    const r = (_ls.get(REQ_KEY, []) || []).find(x => x.acessoToken === acesso);
+    if (!r) return null;
+    return { id: r.id, status: r.status, abertura: r.abertura, prazo: r.prazo, ultimaAtualiz: r.ultimaAtualiz || r.abertura, parceiro: r.parceiro,
+      chat: (r.chat || []).map(m => ({ ...m, role: m.role === "cliente" ? "cliente" : "equipe" })), entregues: _entregaLocal(r) };
+  },
+  // Mensagem do fornecedor no chat (o servidor define autor, reabre se encerrado e avisa a equipe).
+  async publicEnviarMensagem(acesso, { texto, arquivos }) {
+    const limpos = (arquivos || []).map(({ preview, ...a }) => a);
+    if ((await dbMode()) === "remote") {
+      try {
+        const r = await apiJSON("POST", `/api/public/chamado/${encodeURIComponent(acesso)}/mensagens`, { texto, arquivos: limpos });
+        if (r.status === 201) return { ok: true, ...(await r.json()) };
+      } catch (e) { }
+      return { ok: false };
+    }
+    const r = (_ls.get(REQ_KEY, []) || []).find(x => x.acessoToken === acesso);
+    if (!r) return { ok: false };
+    const now = Date.now(), autor = r.dados?.nomeContato || r.parceiro || "Fornecedor";
+    const reaberto = ["CONCLUIDA", "NEGADA"].includes(r.status);
+    const novo = { ...r, chat: [...(r.chat || []), { id: `msg-${now}`, ts: now, role: "cliente", autor, texto, arquivos: limpos, viaPortal: true }], ultimaAtualiz: new Date(now).toLocaleString("pt-BR"), ultimaAtualizTs: now,
+      ...(reaberto ? { status: "EM_ANALISE", movimentos: [...(r.movimentos || []), { status: "EM_ANALISE", actor: "cliente", who: autor, ts: now, text: "Chamado reaberto automaticamente por nova mensagem do fornecedor." }] } : {}) };
+    _ls.upsert(REQ_KEY, novo, "id");
+    _ls.upsert(NOTIF_KEY, { id: `n-${now}`, ts: now, read: false, audience: "interno", requestId: r.id, color: C.cyan, message: `Nova mensagem do fornecedor no chamado ${r.id}: "${texto.slice(0, 60)}"` }, "id");
+    return { ok: true, reaberto, status: novo.status };
   },
   // Base de clientes gocase (Datamart / Reseller) — só para a equipe logada.
   async resellerLookup(cnpj) {
@@ -929,6 +965,7 @@ function ConsultaStatus() {
   const [loading, setLoading] = useState(false);
   const [res, setRes] = useState(null);
   const [err, setErr] = useState("");
+  const [aberto, setAberto] = useState(null); // acesso do chamado aberto (chat)
   const consultar = async () => {
     const temId = !!id.trim(), temCnpj = !!cnpj.replace(/\D/g, ""), temEmail = !!email.trim();
     if (!temId && !temCnpj && !temEmail) { setErr("Informe o seu e-mail, o CNPJ da empresa ou o protocolo."); return; }
@@ -945,6 +982,7 @@ function ConsultaStatus() {
     }
     setRes(r.resultados);
   };
+  if (aberto) return <ChamadoFornecedor acesso={aberto} onVoltar={() => { setAberto(null); consultar(); }} />;
   return (
     <div>
       <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Fornecedor</div>
@@ -974,12 +1012,63 @@ function ConsultaStatus() {
                   <div key={k}><div className="text-xs" style={{ color: C.muted }}>{k}</div><div className="font-medium" style={{ color: C.text }}>{v || "—"}</div></div>
                 ))}
               </div>
-              {item.documentosComCnpj && <p className="text-xs mt-3" style={{ color: C.muted }}>Para ver os documentos liberados pela gocase, informe também o seu e-mail ou o CNPJ da empresa.</p>}
+              {item.documentosComCnpj && <p className="text-xs mt-3" style={{ color: C.muted }}>Para ver os documentos liberados e conversar com a equipe, informe também o seu e-mail ou o CNPJ da empresa.</p>}
+              {item.acesso && <div className="mt-4"><Btn icon={MessageSquare} onClick={() => setAberto(item.acesso)}>Abrir chamado e chat</Btn></div>}
             </Card>
             {item.entregues && <DocsLiberados entregues={item.entregues} />}
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/* Chamado aberto pelo fornecedor (via "Acompanhar solicitação" com e-mail ou CNPJ):
+   status, datas, documentos liberados e o chat com a equipe — sem a linha do tempo
+   interna nem dados cadastrais. Recarrega sozinho a cada 20 s com a aba visível. */
+function ChamadoFornecedor({ acesso, onVoltar }) {
+  const [ch, setCh] = useState(null);
+  const [erro, setErro] = useState("");
+  const carregar = async () => {
+    const r = await db.publicChamado(acesso);
+    if (r) { setCh(r); setErro(""); } else setErro("Não foi possível abrir o chamado agora. Volte e consulte de novo.");
+  };
+  useEffect(() => {
+    carregar();
+    const t = setInterval(() => { if (!document.hidden) carregar(); }, 20000);
+    return () => clearInterval(t);
+  }, [acesso]);
+  const enviar = async (msg) => {
+    const res = await db.publicEnviarMensagem(acesso, msg);
+    if (res.ok) await carregar();
+    return res.ok;
+  };
+  if (!ch) return (
+    <div>
+      <button onClick={onVoltar} className="flex items-center gap-1 text-sm mb-3" style={{ color: C.muted }}><ArrowLeft size={15} /> Voltar</button>
+      {erro ? <div className="text-sm font-semibold" style={{ color: C.danger }}>{erro}</div>
+        : <div className="flex items-center gap-2 text-sm" style={{ color: C.muted }}><Loader2 size={16} className="animate-spin" /> Abrindo chamado…</div>}
+    </div>
+  );
+  const st = STATUS[ch.status] || STATUS.NOVA;
+  return (
+    <div>
+      <button onClick={onVoltar} className="flex items-center gap-1 text-sm mb-3" style={{ color: C.muted }}><ArrowLeft size={15} /> Voltar para a consulta</button>
+      <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Fornecedor</div>
+      <div className="flex items-center gap-3 flex-wrap mb-1">
+        <h1 className="text-2xl font-bold font-mono" style={{ color: C.text }}>{ch.id}</h1>
+        <Pill label={st.label} color={st.color} />
+      </div>
+      <p className="text-sm mb-4" style={{ color: C.muted }}>{ch.parceiro}</p>
+      <Card className="p-5 mb-4">
+        <div className="grid sm:grid-cols-3 gap-3 text-sm">
+          {[["Aberta em", ch.abertura], ["Prazo de análise", ch.prazo], ["Última atualização", ch.ultimaAtualiz]].map(([k, v]) => (
+            <div key={k}><div className="text-xs" style={{ color: C.muted }}>{k}</div><div className="font-medium" style={{ color: C.text }}>{v || "—"}</div></div>
+          ))}
+        </div>
+      </Card>
+      <ChatPanel r={ch} fornecedor onEnviar={enviar} />
+      <DocsLiberados entregues={ch.entregues || []} />
     </div>
   );
 }
@@ -1328,42 +1417,71 @@ function SLAPanel({ r }) {
 }
 
 /* ===================== Chat persistente ===================== */
-function ChatPanel({ r, currentUser, onSendMsg, onReopenRequest }) {
+/* Chat do chamado, o mesmo para os dois lados:
+   - equipe (padrão): mensagem sai como "equipe" via onSendMsg(reqId, msg); "minha" = do
+     usuário logado (cada atendente aparece separado);
+   - fornecedor (`fornecedor`): usado em "Acompanhar solicitação"; mensagem sai como
+     "cliente" via onEnviar(msg) (servidor grava, reabre se encerrado e avisa a equipe);
+     anexos sobem pela rota pública. */
+function ChatPanel({ r, currentUser, onSendMsg, onReopenRequest, fornecedor = false, onEnviar }) {
   const [texto, setTexto] = useState("");
   const [arquivos, setArquivos] = useState([]);
+  const [enviando, setEnviando] = useState(false);
+  const [subindo, setSubindo] = useState(false);
+  const [erro, setErro] = useState("");
   const endRef = useRef(null);
   const msgs = Array.isArray(r.chat) ? r.chat : [];
   const isClosed = ["CONCLUIDA", "NEGADA"].includes(r.status);
-  const isInternal = isInterno(currentUser?.role);
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs.length]);
-  const enviar = () => {
+  const isInternal = !fornecedor && isInterno(currentUser?.role);
+  const ehMinha = (msg) => (fornecedor ? msg.role === "cliente" : msg.autor === currentUser?.name);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, [msgs.length]);
+  const enviar = async () => {
     const t = texto.trim();
-    if (!t && arquivos.length === 0) return;
+    if ((!t && arquivos.length === 0) || enviando) return;
     const msg = { id: `msg-${Date.now()}`, ts: Date.now(), role: isInternal ? "equipe" : "cliente", autor: currentUser?.name || "Usuário", texto: t, arquivos: arquivos.map(f => ({ name: f.name, url: f.url, type: f.type })) };
-    onSendMsg(r.id, msg);
+    setErro("");
+    if (fornecedor) {
+      setEnviando(true);
+      const ok = await onEnviar(msg);
+      setEnviando(false);
+      if (!ok) { setErro("Não foi possível enviar agora. Tente novamente."); return; }
+    } else {
+      onSendMsg(r.id, msg);
+      if (isClosed && !isInternal) onReopenRequest(r.id, msg);
+    }
     setTexto(""); setArquivos([]);
-    if (isClosed && !isInternal) onReopenRequest(r.id, msg);
+  };
+  const anexar = async (e) => {
+    const lista = Array.from(e.target.files || []); e.target.value = "";
+    if (!lista.length) return;
+    setErro(""); setSubindo(true);
+    try {
+      const novos = await Promise.all(lista.map(f => (fornecedor ? db.uploadPublicFile(f) : db.uploadFile(f))));
+      setArquivos(a => [...a, ...novos].slice(0, 5));
+    } catch (er) { setErro(er?.message || "Não foi possível anexar o arquivo."); }
+    finally { setSubindo(false); }
   };
   const handleKey = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); enviar(); } };
   const fmtMsgTime = (ts) => { const d = new Date(ts); return `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; };
   return (
     <Card className="flex flex-col" style={{ minHeight: 340 }}>
-      <div className="flex items-center gap-2 px-5 py-3 border-b" style={{ borderColor: C.line }}>
+      <div className="flex items-center gap-2 px-5 py-3 border-b flex-wrap" style={{ borderColor: C.line }}>
         <MessageSquare size={16} style={{ color: C.coral }} />
-        <h2 className="font-bold text-sm" style={{ color: C.text }}>Chat do chamado</h2>
-        {isClosed && <span className="ml-auto text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: C.coralSoft, color: C.coral }}>Encerrado — envie uma mensagem para reabrir</span>}
+        <h2 className="font-bold text-sm" style={{ color: C.text }}>{fornecedor ? "Chat com a equipe gocase" : "Chat do chamado"}</h2>
+        {!fornecedor && <span className="text-[11px]" style={{ color: C.muted }}>· visível para o fornecedor em "Acompanhar solicitação"</span>}
+        {isClosed && <span className="ml-auto text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: C.coralSoft, color: C.coral }}>{isInternal ? "Encerrado — uma mensagem do fornecedor reabre" : "Encerrado — envie uma mensagem para reabrir"}</span>}
       </div>
       <div className="flex-1 overflow-y-auto p-4 space-y-3" style={{ maxHeight: 320 }}>
-        {msgs.length === 0 && <div className="text-center text-sm py-8" style={{ color: C.muted }}>Nenhuma mensagem ainda. Use o chat para comunicação direta sobre este chamado.</div>}
+        {msgs.length === 0 && <div className="text-center text-sm py-8" style={{ color: C.muted }}>{fornecedor ? "Nenhuma mensagem ainda. Escreva aqui para falar com a equipe de cadastro da gocase." : "Nenhuma mensagem ainda. Use o chat para comunicação direta sobre este chamado."}</div>}
         {msgs.map((msg) => {
-          const isMine = msg.autor === currentUser?.name;
+          const isMine = ehMinha(msg);
           return (
             <div key={msg.id} className={`flex ${isMine ? "justify-end" : "justify-start"}`}>
               <div className="max-w-[80%]">
-                <div className="text-[10px] mb-1" style={{ color: C.muted, textAlign: isMine ? "right" : "left" }}>{msg.autor} · {fmtMsgTime(msg.ts)}</div>
+                <div className="text-[10px] mb-1" style={{ color: C.muted, textAlign: isMine ? "right" : "left" }}>{msg.autor}{!fornecedor && msg.role === "cliente" ? " (fornecedor)" : ""} · {fmtMsgTime(msg.ts)}</div>
                 <div className="rounded-2xl px-4 py-2.5 text-sm" style={{ background: isMine ? C.coral : C.bg, color: isMine ? "white" : C.text, border: isMine ? "none" : `1px solid ${C.line}`, borderRadius: isMine ? "18px 18px 4px 18px" : "18px 18px 18px 4px" }}>
-                  {msg.texto && <p>{msg.texto}</p>}
-                  {msg.arquivos?.length > 0 && <div className="mt-2 space-y-1">{msg.arquivos.map((f, i) => <button key={i} onClick={() => abrirDoc(f, null)} className="flex items-center gap-1 text-xs underline opacity-90"><Paperclip size={11} />{f.name}</button>)}</div>}
+                  {msg.texto && <p className="whitespace-pre-wrap break-words">{msg.texto}</p>}
+                  {msg.arquivos?.length > 0 && <div className="mt-2 space-y-1">{msg.arquivos.map((f, i) => <button key={i} onClick={() => abrirDoc(f, null)} className="flex items-center gap-1 text-xs underline opacity-90 text-left"><Paperclip size={11} className="shrink-0" />{f.name}</button>)}</div>}
                 </div>
               </div>
             </div>
@@ -1372,18 +1490,17 @@ function ChatPanel({ r, currentUser, onSendMsg, onReopenRequest }) {
         <div ref={endRef} />
       </div>
       <div className="border-t p-3" style={{ borderColor: C.line }}>
+        {erro && <div className="text-xs mb-2 font-semibold" style={{ color: C.danger }}>{erro}</div>}
         {arquivos.length > 0 && <div className="flex gap-2 mb-2 flex-wrap">{arquivos.map((f, i) => <div key={i} className="flex items-center gap-1 text-xs rounded-lg px-2 py-1" style={{ background: C.coralSoft, color: C.coral }}><Paperclip size={11} />{f.name}<button onClick={() => setArquivos(a => a.filter((_, j) => j !== i))}><X size={11} /></button></div>)}</div>}
         <div className="flex gap-2 items-end">
-          <textarea value={texto} onChange={e => setTexto(e.target.value)} onKeyDown={handleKey} placeholder={isClosed && !isInternal ? "Envie uma mensagem para reabrir o chamado…" : "Escreva uma mensagem… (Enter para enviar)"} rows={2} className="flex-1 rounded-xl border px-3 py-2 text-sm resize-none bg-white" style={{ borderColor: C.line }} />
-          <label className="cursor-pointer rounded-xl p-2.5 hover:bg-gray-50" title="Anexar arquivo">
-            <input type="file" className="hidden" multiple onChange={async e => {
-              const newFiles = await Promise.all(Array.from(e.target.files || []).map(f => db.uploadFile(f)));
-              setArquivos(a => [...a, ...newFiles]);
-              e.target.value = "";
-            }} />
-            <Paperclip size={18} style={{ color: C.muted }} />
+          <textarea value={texto} onChange={e => setTexto(e.target.value)} onKeyDown={handleKey} maxLength={4000} placeholder={isClosed && !isInternal ? "Envie uma mensagem para reabrir o chamado…" : "Escreva uma mensagem… (Enter para enviar)"} rows={2} className="flex-1 min-w-0 rounded-xl border px-3 py-2 text-sm resize-none bg-white" style={{ borderColor: C.line }} />
+          <label className="cursor-pointer rounded-xl p-2.5 hover:bg-gray-50 shrink-0" title={fornecedor ? `Anexar arquivo (${PUBLIC_FILE_FORMATOS}, até 10 MB)` : "Anexar arquivo"}>
+            <input type="file" className="hidden" multiple accept={fornecedor ? PUBLIC_FILE_ACCEPT : undefined} onChange={anexar} />
+            {subindo ? <Loader2 size={18} className="animate-spin" style={{ color: C.coral }} /> : <Paperclip size={18} style={{ color: C.muted }} />}
           </label>
-          <button onClick={enviar} className="rounded-xl px-4 py-2.5 text-sm font-bold text-white flex items-center gap-1.5" style={{ background: C.coral }}><Send size={15} />Enviar</button>
+          <button onClick={enviar} disabled={enviando || subindo} className="rounded-xl px-4 py-2.5 text-sm font-bold text-white flex items-center gap-1.5 shrink-0" style={{ background: C.coral, opacity: enviando || subindo ? .7 : 1 }}>
+            {enviando ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}Enviar
+          </button>
         </div>
       </div>
     </Card>
@@ -3291,6 +3408,20 @@ export default function App() {
     return true;
   };
 
+  // Portal interno: busca novidades a cada 45 s com a aba visível — mensagens que o
+  // fornecedor manda pelo chat (e cadastros novos) aparecem sem recarregar a página.
+  useEffect(() => {
+    if (!currentUser) return;
+    const t = setInterval(async () => {
+      if (document.hidden) return;
+      const data = await db.bootstrap();
+      if (!data) return;
+      if (Array.isArray(data.requests)) setRequests(data.requests.filter(r => r.tipo === "Cadastro"));
+      if (Array.isArray(data.notifications)) setNotifications(data.notifications);
+    }, 45000);
+    return () => clearInterval(t);
+  }, [currentUser]);
+
   // Ao abrir: descobre se já há sessão válida da equipe; senão mostra o formulário público.
   useEffect(() => {
     let alive = true;
@@ -3489,7 +3620,7 @@ export default function App() {
       const updated = { ...req, chat: [...(req.chat || []), msg], ultimaAtualiz: new Date().toLocaleString("pt-BR"), ultimaAtualizTs: msg.ts };
       setRequests(rs => rs.map(r => r.id === reqId ? updated : r));
       db.saveRequest(updated);
-      pushNotif({ message: `Nova anotação no chamado ${reqId}: "${(msg.texto || "").slice(0, 60)}…"`, requestId: reqId, color: C.cyan, audience: "interno" });
+      pushNotif({ message: `${currentUser?.name || "Equipe"} respondeu no chat do chamado ${reqId}: "${(msg.texto || "").slice(0, 60)}…"`, requestId: reqId, color: C.cyan, audience: "interno" });
     }
   };
   const reopenRequest = () => { };

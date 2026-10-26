@@ -25,9 +25,14 @@
  *   POST   /api/public/files  {name,type,size,data(base64)} → { id, name, type, size, url }
  *          (até 10 MB; JPG, PNG, WEBP, MP4, MOV, PDF, CSV ou XLSX — validado pela extensão)
  *   POST   /api/public/cadastro {cnpj, emailSolicitante, dados…} → { id, abertura, prazo, entregues:[doc] }
- *   GET    /api/public/status?email=&cnpj=&id=  → { resultados: [{ id, status, abertura, prazo, ultimaAtualiz, entregues? }] }
+ *   GET    /api/public/status?email=&cnpj=&id=  → { resultados: [{ id, status, abertura, prazo, ultimaAtualiz, entregues?, acesso? }] }
  *          Basta um dos três: e-mail do solicitante ou CNPJ listam as solicitações (com documentos);
  *          só protocolo mostra o status, sem documentos (o protocolo é sequencial).
+ *   GET    /api/public/chamado/:acesso           → { id, status, datas, chat, entregues } — o `acesso` vem na
+ *          consulta por e-mail ou CNPJ; nunca traz linha do tempo interna nem dados cadastrais
+ *   POST   /api/public/chamado/:acesso/mensagens {texto, arquivos[]} → mensagem do fornecedor no chat
+ *          (reabre chamado Concluído/Negado e avisa a equipe)
+ *   GET    /api/public/chamado/:acesso/arquivo/:fileId → anexo de uma mensagem daquele chat
  *   GET    /api/public/entrega/:token/:docId    → arquivo de um documento do acervo com
  *          "envio automático" ou enviado pela equipe nessa solicitação (token só vai para quem enviou).
  *          Documentos sem envio automático só saem por aqui depois que a equipe clica em
@@ -615,7 +620,8 @@ async function publicStatus(env, id, cnpj, email) {
   for (const req of reqs) {
     resultados.push({
       id: req.id, status: req.status, abertura: req.abertura, prazo: req.prazo, ultimaAtualiz: req.ultimaAtualiz || req.abertura,
-      ...(comDocs ? { entregues: await entregaPublica(env, req) } : { documentosComCnpj: true }),
+      // Com e-mail ou CNPJ também vai o acesso ao chamado (abrir e conversar no chat).
+      ...(comDocs ? { entregues: await entregaPublica(env, req), acesso: await garantirAcesso(env, req) } : { documentosComCnpj: true }),
     });
   }
   return json({ resultados });
@@ -632,6 +638,115 @@ async function entregaArquivo(env, token, docId) {
   if (!fileId) return json({ error: "not_found" }, 404);
   const res = await fileResponse(env, fileId, false);
   res.headers.set("cache-control", "no-store"); // cancelar o envio precisa valer na hora
+  return res;
+}
+
+/* ------------------------ chamado aberto ao fornecedor ------------------------ *
+ * Quem consulta por e-mail do solicitante ou CNPJ recebe o `acessoToken` do chamado
+ * (aleatório, criado na primeira consulta) e com ele abre o chamado: status, datas,
+ * documentos liberados e o chat com a equipe. Nunca vê a linha do tempo interna,
+ * dados cadastrais nem anexos do formulário. */
+const CHAT_MAX_MSGS = 500;
+const CHAT_MAX_ANEXOS = 5;
+
+async function getRequest(env, id) {
+  const r = await env.DB.query("SELECT payload FROM requests WHERE id = ?", [id]);
+  return r.rows && r.rows[0] ? parse(r.rows[0].payload) : null;
+}
+async function gravarRequest(env, req) {
+  await env.DB.exec(
+    "UPDATE requests SET status = ?, updated_ts = ?, payload = ? WHERE id = ?",
+    [req.status || "", req.ultimaAtualizTs || Date.now(), JSON.stringify(req), req.id],
+  );
+}
+async function requestPorAcesso(env, token) {
+  if (!/^[0-9a-f]{48}$/.test(String(token || ""))) return null;
+  const r = await env.DB.query("SELECT payload FROM requests WHERE json_extract(payload, '$.acessoToken') = ?", [token]);
+  return r.rows && r.rows[0] ? parse(r.rows[0].payload) : null;
+}
+// Junta o chamado gravado pela equipe com o que está no banco: mensagens e movimentos
+// que só existem no banco (ex.: o fornecedor escreveu enquanto a tela estava aberta)
+// são mantidos; tokens de acesso/entrega nunca se perdem.
+function mesclarChamado(atual, recebido) {
+  if (!atual) return recebido;
+  const unir = (a, b, chave) => {
+    const vistos = new Map();
+    for (const x of [...(a || []), ...(b || [])]) if (x) vistos.set(chave(x), x);
+    return [...vistos.values()].sort((x, y) => (x.ts || 0) - (y.ts || 0));
+  };
+  return {
+    ...recebido,
+    chat: unir(atual.chat, recebido.chat, (m) => m.id || `${m.ts}|${m.texto}`),
+    movimentos: unir(atual.movimentos, recebido.movimentos, (m) => `${m.ts}|${m.status}|${m.text}`),
+    acessoToken: recebido.acessoToken || atual.acessoToken || "",
+    entregaToken: recebido.entregaToken || atual.entregaToken || "",
+  };
+}
+async function garantirAcesso(env, req) {
+  if (req.acessoToken) return req.acessoToken;
+  req.acessoToken = randomToken(24);
+  await gravarRequest(env, { ...req, ultimaAtualizTs: req.ultimaAtualizTs || req.aberturaTs });
+  return req.acessoToken;
+}
+// Visão do fornecedor: anexos do chat apontam para a rota pública do próprio chamado.
+function chatPublico(req) {
+  const token = req.acessoToken;
+  return (req.chat || []).map((m) => ({
+    id: m.id, ts: m.ts, role: m.role === "cliente" ? "cliente" : "equipe", autor: m.autor || (m.role === "cliente" ? "Fornecedor" : "Equipe gocase"),
+    texto: m.texto || "",
+    arquivos: (m.arquivos || []).map((f) => {
+      const fid = fileIdFromUrl(f.url);
+      return fid ? { name: f.name || "arquivo", type: f.type || "", url: `/api/public/chamado/${token}/arquivo/${fid}` } : null;
+    }).filter(Boolean),
+  }));
+}
+async function chamadoPublico(env, token) {
+  const req = await requestPorAcesso(env, token);
+  if (!req) return json({ error: "not_found" }, 404);
+  return json({
+    id: req.id, status: req.status, abertura: req.abertura, prazo: req.prazo, ultimaAtualiz: req.ultimaAtualiz || req.abertura,
+    parceiro: req.parceiro, chat: chatPublico(req), entregues: await entregaPublica(env, req),
+  });
+}
+async function mensagemDoFornecedor(env, token, body) {
+  const req = await requestPorAcesso(env, token);
+  if (!req) return json({ error: "not_found" }, 404);
+  const texto = str(body && body.texto, 4000);
+  const arquivos = (Array.isArray(body && body.arquivos) ? body.arquivos : []).slice(0, CHAT_MAX_ANEXOS)
+    .filter((a) => a && fileIdFromUrl(a.url))
+    .map((a) => ({ name: str(a.name, 200) || "arquivo", type: str(a.type, 100), url: a.url }));
+  if (!texto && !arquivos.length) return json({ error: "empty" }, 400);
+  if ((req.chat || []).length >= CHAT_MAX_MSGS) return json({ error: "chat_full" }, 429);
+  const now = Date.now();
+  const autor = (req.dados && req.dados.nomeContato) || req.parceiro || "Fornecedor";
+  const msg = { id: `msg-${now}-${randomToken(3)}`, ts: now, role: "cliente", autor, texto, arquivos, viaPortal: true };
+  const reabrir = ["CONCLUIDA", "NEGADA"].includes(req.status);
+  const novo = {
+    ...req,
+    chat: [...(req.chat || []), msg],
+    ultimaAtualiz: fmtBRFull(now), ultimaAtualizTs: now,
+    ...(reabrir ? {
+      status: "EM_ANALISE",
+      movimentos: [...(req.movimentos || []), { status: "EM_ANALISE", actor: "cliente", who: autor, ts: now, text: "Chamado reaberto automaticamente por nova mensagem do fornecedor." }],
+    } : {}),
+  };
+  await gravarRequest(env, novo);
+  await saveNotification(env, {
+    id: `n-${now}-${randomToken(3)}`, ts: now, read: false, audience: "interno", requestId: req.id, color: reabrir ? "#FFC247" : "#00B8D9",
+    message: reabrir
+      ? `Chamado ${req.id} REABERTO por nova mensagem do fornecedor: "${texto.slice(0, 60)}${texto.length > 60 ? "…" : ""}"`
+      : `Nova mensagem do fornecedor no chamado ${req.id}: "${texto.slice(0, 60)}${texto.length > 60 ? "…" : ""}"`,
+  });
+  return json({ ok: true, reaberto: reabrir, status: novo.status, mensagem: chatPublico({ ...novo, chat: [msg] })[0] }, 201);
+}
+// Arquivo de uma mensagem do chat, só para quem tem o acesso daquele chamado.
+async function arquivoDoChat(env, token, fileId) {
+  const req = await requestPorAcesso(env, token);
+  if (!req) return json({ error: "not_found" }, 404);
+  const doChat = (req.chat || []).some((m) => (m.arquivos || []).some((f) => fileIdFromUrl(f.url) === fileId));
+  if (!doChat) return json({ error: "not_found" }, 404);
+  const res = await fileResponse(env, fileId, false);
+  res.headers.set("cache-control", "no-store");
   return res;
 }
 
@@ -709,6 +824,14 @@ export default {
         const body = (await request.json().catch(() => null)) || null;
         if (!body) return json({ error: "invalid_body" }, 400);
         return await createCadastro(env, body);
+      }
+
+      if (path.startsWith("/api/public/chamado/")) {
+        const [token = "", sub = "", fileId = ""] = path.slice("/api/public/chamado/".length).split("/").map((x) => decodeURIComponent(x));
+        if (!sub && method === "GET") return await chamadoPublico(env, token);
+        if (sub === "mensagens" && method === "POST") return await mensagemDoFornecedor(env, token, (await request.json().catch(() => null)) || {});
+        if (sub === "arquivo" && fileId && method === "GET") return await arquivoDoChat(env, token, fileId);
+        return json({ error: "not_found" }, 404);
       }
 
       if (path.startsWith("/api/public/entrega/") && method === "GET") {
@@ -812,8 +935,11 @@ export default {
 
       if (path.startsWith("/api/requests/") && method === "PUT") {
         const id = decodeURIComponent(path.slice("/api/requests/".length));
-        const req = (await request.json().catch(() => null)) || null;
-        if (!req || !req.id || req.id !== id) return json({ error: "invalid_body" }, 400);
+        const recebido = (await request.json().catch(() => null)) || null;
+        if (!recebido || !recebido.id || recebido.id !== id) return json({ error: "invalid_body" }, 400);
+        // A tela da equipe grava o chamado inteiro: junta com o que está no banco para não
+        // apagar mensagens que o fornecedor mandou enquanto a tela estava aberta.
+        const req = mesclarChamado(await getRequest(env, id), recebido);
         await env.DB.exec(
           `INSERT INTO requests (id, owner_email, status, tipo, updated_ts, payload)
            VALUES (?, ?, ?, ?, ?, ?)
