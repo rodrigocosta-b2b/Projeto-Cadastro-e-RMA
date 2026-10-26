@@ -26,10 +26,10 @@
  *          (até 10 MB; JPG, PNG, WEBP, MP4, MOV, PDF, CSV ou XLSX — validado pela extensão)
  *   POST   /api/public/cadastro {cnpj, emailSolicitante, dados…} → { id, abertura, prazo, entregues:[doc] }
  *   GET    /api/public/status?email=&cnpj=&id=  → { resultados: [{ id, status, abertura, prazo, ultimaAtualiz, entregues?, acesso? }] }
- *          Basta um dos três: e-mail do solicitante ou CNPJ listam as solicitações (com documentos);
- *          só protocolo mostra o status, sem documentos (o protocolo é sequencial).
+ *          Basta um dos três (e-mail do solicitante, CNPJ ou protocolo): cada solicitação vem com os
+ *          documentos liberados e o `acesso` ao chamado. Limite: 40 consultas / 15 min por IP (429).
  *   GET    /api/public/chamado/:acesso           → { id, status, datas, chat, entregues } — o `acesso` vem na
- *          consulta por e-mail ou CNPJ; nunca traz linha do tempo interna nem dados cadastrais
+ *          consulta (qualquer um dos três dados); nunca traz linha do tempo interna nem dados cadastrais
  *   POST   /api/public/chamado/:acesso/mensagens {texto, arquivos[]} → mensagem do fornecedor no chat
  *          (reabre chamado Concluído/Negado e avisa a equipe)
  *   GET    /api/public/chamado/:acesso/arquivo/:fileId → anexo de uma mensagem daquele chat
@@ -306,6 +306,28 @@ async function staffUser(request, env) {
   const u = await getUser(env, s.email);
   if (!u || !STAFF.includes(u.role) || (u.status && u.status !== "Ativo")) return null;
   return { ...stripPw(u), token };
+}
+
+/* Limite de consultas públicas ("Acompanhar solicitação") por endereço de internet:
+ * qualquer um dos três dados (e-mail, CNPJ ou protocolo) abre o chamado inteiro, e o
+ * protocolo é sequencial — o limite impede varrer os protocolos em massa. Reusa a
+ * tabela de tentativas de login com a chave "consulta:<ip>". Sem IP conhecido, não limita. */
+const CONSULTA_MAX = 40;
+const CONSULTA_JANELA_MS = 15 * 60 * 1000;
+async function consultaLimitada(env, request) {
+  const ip = (request.headers.get("cf-connecting-ip") || request.headers.get("x-forwarded-for") || "").split(",")[0].trim();
+  if (!ip) return false;
+  const chave = `consulta:${ip}`;
+  const now = Date.now();
+  const r = await env.DB.query("SELECT fails, first_ts FROM login_attempts WHERE email = ?", [chave]);
+  const a = r.rows && r.rows[0];
+  if (!a || now - a.first_ts >= CONSULTA_JANELA_MS) {
+    await env.DB.exec("INSERT INTO login_attempts (email, fails, first_ts) VALUES (?, 1, ?) ON CONFLICT(email) DO UPDATE SET fails = 1, first_ts = excluded.first_ts", [chave, now]);
+    return false;
+  }
+  if (a.fails >= CONSULTA_MAX) return true;
+  await env.DB.exec("UPDATE login_attempts SET fails = fails + 1 WHERE email = ?", [chave]);
+  return false;
 }
 
 async function loginThrottled(env, email) {
@@ -590,9 +612,9 @@ async function createCadastro(env, body) {
 
 /* Acompanhamento público: basta UM entre e-mail do solicitante, CNPJ e protocolo
  * (informando mais de um, todos precisam bater).
- *  - e-mail ou CNPJ → todas as solicitações que batem, com os documentos liberados;
- *  - só protocolo   → só o status (o protocolo é sequencial, então sem e-mail/CNPJ não
- *                     mostramos documentos — evita baixar arquivos "chutando" números).
+ *  Qualquer um dos três dá acesso completo ao chamado (documentos liberados + `acesso`
+ *  para o chat) — decisão do negócio. O protocolo é sequencial, por isso a rota tem
+ *  limite de consultas por IP (consultaLimitada).
  * Nunca devolve dados cadastrais, mensagens ou anexos do fornecedor. */
 async function publicStatus(env, id, cnpj, email) {
   const protocolo = str(id, 40).toUpperCase();
@@ -615,13 +637,12 @@ async function publicStatus(env, id, cnpj, email) {
     .filter((req) => !digits || onlyDigits(req.cnpj) === digits)
     .filter((req) => !mail || lower(req.emailSolicitante || req.ownerEmail) === mail);
   if (!reqs.length) return json({ error: "not_found" }, 404);
-  const comDocs = !!(digits || mail);
   const resultados = [];
   for (const req of reqs) {
     resultados.push({
       id: req.id, status: req.status, abertura: req.abertura, prazo: req.prazo, ultimaAtualiz: req.ultimaAtualiz || req.abertura,
-      // Com e-mail ou CNPJ também vai o acesso ao chamado (abrir e conversar no chat).
-      ...(comDocs ? { entregues: await entregaPublica(env, req), acesso: await garantirAcesso(env, req) } : { documentosComCnpj: true }),
+      // Qualquer um dos três dados dá acesso ao chamado: documentos liberados e chat.
+      entregues: await entregaPublica(env, req), acesso: await garantirAcesso(env, req),
     });
   }
   return json({ resultados });
@@ -840,6 +861,7 @@ export default {
       }
 
       if (path === "/api/public/status" && method === "GET") {
+        if (await consultaLimitada(env, request)) return json({ error: "throttled" }, 429);
         return await publicStatus(env, url.searchParams.get("id") || "", url.searchParams.get("cnpj") || "", url.searchParams.get("email") || "");
       }
 

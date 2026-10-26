@@ -562,13 +562,14 @@ const db = {
     return { ok: true, id, abertura: req.abertura, prazo: req.prazo, entregues: _entregaLocal(req) };
   },
   // Acompanhamento: basta UM entre e-mail do solicitante, CNPJ e protocolo (mesma regra
-  // do servidor). Devolve { resultados: [...] } ou null; só com o protocolo não vêm documentos.
+  // do servidor) — qualquer um abre o chamado (documentos + chat). Devolve { resultados } , { throttled } ou null.
   async publicStatus(id, cnpj, email) {
     if ((await dbMode()) === "remote") {
       try {
         const qs = `id=${encodeURIComponent(id || "")}&cnpj=${encodeURIComponent(cnpj || "")}&email=${encodeURIComponent(email || "")}`;
         const r = await apiJSON("GET", `/api/public/status?${qs}`);
         if (r.ok) return await r.json();
+        if (r.status === 429) return { throttled: true };
       } catch (e) { }
       return null;
     }
@@ -579,7 +580,7 @@ const db = {
       if (!r.acessoToken) { r.acessoToken = Array.from(crypto.getRandomValues(new Uint8Array(24)), b => b.toString(16).padStart(2, "0")).join(""); _ls.upsert(REQ_KEY, r, "id"); }
       return r.acessoToken;
     };
-    return { resultados: achados.map(r => ({ id: r.id, status: r.status, abertura: r.abertura, prazo: r.prazo, ultimaAtualiz: r.ultimaAtualiz || r.abertura, ...(d || m ? { entregues: _entregaLocal(r), acesso: acessoLocal(r) } : { documentosComCnpj: true }) })) };
+    return { resultados: achados.map(r => ({ id: r.id, status: r.status, abertura: r.abertura, prazo: r.prazo, ultimaAtualiz: r.ultimaAtualiz || r.abertura, entregues: _entregaLocal(r), acesso: acessoLocal(r) })) };
   },
   // Chamado aberto ao fornecedor (status, chat e documentos liberados), pelo `acesso`
   // que vem na consulta por e-mail/CNPJ. null se o acesso não vale.
@@ -974,6 +975,7 @@ function ConsultaStatus() {
     setErr(""); setLoading(true);
     const r = await db.publicStatus(id.trim(), temCnpj ? cnpj : "", temEmail ? email.trim() : "");
     setLoading(false);
+    if (r && r.throttled) { setRes(null); setErr("Muitas consultas seguidas. Aguarde alguns minutos e tente de novo."); return; }
     if (!r || !r.resultados?.length) {
       setRes(null);
       const usados = [temEmail && "e-mail", temCnpj && "CNPJ", temId && "protocolo"].filter(Boolean);
@@ -987,7 +989,7 @@ function ConsultaStatus() {
     <div>
       <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Fornecedor</div>
       <h1 className="text-2xl font-bold" style={{ color: C.text }}>Acompanhar solicitação</h1>
-      <p className="text-sm mb-5" style={{ color: C.muted }}>Basta preencher <b style={{ color: C.text }}>um</b> dos campos. Com o seu e-mail ou o CNPJ você vê todas as suas solicitações e os documentos liberados.</p>
+      <p className="text-sm mb-5" style={{ color: C.muted }}>Basta preencher <b style={{ color: C.text }}>um</b> dos campos para abrir o chamado, ver os documentos e conversar com a equipe. Com o seu e-mail ou o CNPJ aparecem todas as suas solicitações.</p>
       <Card className="p-5 mb-4">
         <div className="grid sm:grid-cols-3 gap-4">
           <Field label="Seu e-mail (solicitante)" value={email} onChange={e => setEmail(e.target.value)} type="email" />
@@ -1012,7 +1014,6 @@ function ConsultaStatus() {
                   <div key={k}><div className="text-xs" style={{ color: C.muted }}>{k}</div><div className="font-medium" style={{ color: C.text }}>{v || "—"}</div></div>
                 ))}
               </div>
-              {item.documentosComCnpj && <p className="text-xs mt-3" style={{ color: C.muted }}>Para ver os documentos liberados e conversar com a equipe, informe também o seu e-mail ou o CNPJ da empresa.</p>}
               {item.acesso && <div className="mt-4"><Btn icon={MessageSquare} onClick={() => setAberto(item.acesso)}>Abrir chamado e chat</Btn></div>}
             </Card>
             {item.entregues && <DocsLiberados entregues={item.entregues} />}
