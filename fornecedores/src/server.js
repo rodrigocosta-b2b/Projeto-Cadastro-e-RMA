@@ -23,6 +23,7 @@
  *   GET    /api/health
  *   GET    /api/public/acervo                   → [{ id, nome, documento, empresa, descricao, envioAutomatico }] (sem links)
  *   POST   /api/public/files  {name,type,size,data(base64)} → { id, name, type, size, url }
+ *          (até 10 MB; JPG, PNG, WEBP, MP4, MOV, PDF, CSV ou XLSX — validado pela extensão)
  *   POST   /api/public/cadastro {cnpj, emailSolicitante, dados…} → { id, abertura, prazo, entregues:[doc] }
  *   GET    /api/public/status?email=&cnpj=&id=  → { resultados: [{ id, status, abertura, prazo, ultimaAtualiz, entregues? }] }
  *          Basta um dos três: e-mail do solicitante ou CNPJ listam as solicitações (com documentos);
@@ -60,7 +61,29 @@ const SEED_ADMINS = [
   { email: "rodrigo.costa@gocase.com", name: "Rodrigo Costa", role: "ADMIN" },
   { email: "larissa.simoes@gocase.com", name: "Larissa Simões", role: "ADMIN" },
 ];
-const PUBLIC_FILE_TYPES = ["image/jpeg", "image/png", "image/webp", "video/mp4", "video/quicktime", "application/pdf"];
+/* Formatos aceitos no formulário público, pela EXTENSÃO do arquivo. Para cada uma: o tipo
+ * gravado (canônico) e os tipos que o navegador pode informar — no Windows um .csv
+ * costuma chegar como "application/vnd.ms-excel" (associação com o Excel) ou sem tipo. */
+const XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const PUBLIC_FILE_EXT = {
+  jpg: ["image/jpeg", ["image/jpeg", "image/pjpeg"]],
+  jpeg: ["image/jpeg", ["image/jpeg", "image/pjpeg"]],
+  png: ["image/png", ["image/png"]],
+  webp: ["image/webp", ["image/webp"]],
+  mp4: ["video/mp4", ["video/mp4"]],
+  mov: ["video/quicktime", ["video/quicktime"]],
+  pdf: ["application/pdf", ["application/pdf"]],
+  csv: ["text/csv", ["text/csv", "application/csv", "text/plain", "application/vnd.ms-excel", "text/x-csv", "application/octet-stream"]],
+  xlsx: [XLSX_TYPE, [XLSX_TYPE, "application/octet-stream", "application/zip"]],
+};
+// Tipo canônico do arquivo enviado pelo público, ou "" se o formato não é aceito.
+function tipoArquivoPublico(name, type) {
+  const ext = (String(name || "").toLowerCase().match(/\.([a-z0-9]+)$/) || [])[1] || "";
+  const regra = PUBLIC_FILE_EXT[ext];
+  if (!regra) return "";
+  const t = String(type || "").toLowerCase().split(";")[0].trim();
+  return !t || regra[1].includes(t) ? regra[0] : "";
+}
 const PUBLIC_FILE_MAX = 10 * 1024 * 1024; // 10 MB por arquivo
 const LOGIN_MAX_FAILS = 8;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
@@ -675,9 +698,11 @@ export default {
       if (path === "/api/public/files" && method === "POST") {
         const body = (await request.json().catch(() => null)) || null;
         if (!body || typeof body.data !== "string") return json({ error: "invalid_body" }, 400);
-        if (!PUBLIC_FILE_TYPES.includes(body.type)) return json({ error: "file_type" }, 415);
+        const tipo = tipoArquivoPublico(body.name, body.type);
+        if (!tipo) return json({ error: "file_type" }, 415);
         if (body.data.length > Math.ceil(PUBLIC_FILE_MAX / 3) * 4 + 4) return json({ error: "file_too_large" }, 413);
-        return fileRefResponse(await fileInsert(env, body), body);
+        const arquivo = { ...body, type: tipo }; // grava o tipo canônico (ex.: .csv sempre text/csv)
+        return fileRefResponse(await fileInsert(env, arquivo), arquivo);
       }
 
       if (path === "/api/public/cadastro" && method === "POST") {

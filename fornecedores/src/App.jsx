@@ -12,7 +12,7 @@ import {
   Send, ArrowLeft, ShieldCheck, FileCheck, Download, Phone, Mail,
   MapPin, Smartphone, MessageSquare, TrendingUp, Package, Check,
   Loader2, X, Film, FileText as FileIcon, ExternalLink, Maximize2, Minimize2, Save,
-  Sun, Moon, Monitor, Eye, LayoutGrid, List, Menu, Pencil,
+  Sun, Moon, Monitor, Eye, LayoutGrid, List, Menu, Pencil, FileSpreadsheet,
 } from "lucide-react";
 // recharts é carregado sob demanda (import dinâmico, ver useRecharts()) — é a maior
 // fatia do bundle e só o Dashboard usa gráficos, então isolá-lo reduz o JS inicial
@@ -132,6 +132,8 @@ const Field = ({ label, value, onChange, type = "text", full, options }) => (
 /* Upload real de arquivos — converte para base64 (data: URL) para persistência
    entre sessões. blob: URLs somem ao fechar a página; data: URLs sobrevivem
    no storage (localStorage / window.storage). Limite recomendado: ~3 MB por arquivo. */
+// Planilha (CSV/XLSX/XLS) pelo tipo ou pela extensão — usado só para escolher o ícone.
+const ehPlanilha = (ref) => /csv|spreadsheet|ms-excel/.test(String(ref?.type || "")) || /\.(csv|xlsx|xls)$/i.test(String(ref?.name || ""));
 function FileUpload({ accept = "image/jpeg,image/png,image/webp,video/mp4,video/quicktime,application/pdf", hint = "Clique ou arraste para adicionar — imagens (JPG, PNG, WEBP), vídeos (MP4, MOV) e PDF", initial = [], onFiles, upload = (file) => db.uploadFile(file) }) {
   const [files, setFiles] = useState(initial);
   const [drag, setDrag] = useState(false);
@@ -186,7 +188,7 @@ function FileUpload({ accept = "image/jpeg,image/png,image/webp,video/mp4,video/
                 <div className="h-24 flex items-center justify-center bg-gray-50">
                   {isImg ? <img src={f.preview || f.url} alt={f.name} className="h-full w-full object-cover" />
                     : isVid ? <video src={f.preview || f.url} className="h-full w-full object-cover" muted />
-                      : <div style={{ color: C.coral }} className="flex flex-col items-center">{isPdf ? <FileIcon size={26} /> : <Paperclip size={26} />}</div>}
+                      : <div style={{ color: C.coral }} className="flex flex-col items-center">{isPdf ? <FileIcon size={26} /> : ehPlanilha(f) ? <FileSpreadsheet size={26} style={{ color: C.green }} /> : <Paperclip size={26} />}</div>}
                 </div>
                 <div className="p-2">
                   <div className="text-xs font-medium truncate" style={{ color: C.text }}>{f.name}</div>
@@ -303,6 +305,10 @@ const readAsDataURL = (file) => new Promise((res, rej) => {
   r.readAsDataURL(file);
 });
 const PUBLIC_FILE_MAX = 10 * 1024 * 1024; // igual ao limite do worker
+// Formatos do formulário público — mesma lista de PUBLIC_FILE_EXT no worker (validação pela extensão).
+const PUBLIC_FILE_EXT = ["jpg", "jpeg", "png", "webp", "mp4", "mov", "pdf", "csv", "xlsx"];
+const PUBLIC_FILE_FORMATOS = "JPG, PNG, WEBP, MP4, MOV, PDF, CSV ou XLSX";
+const PUBLIC_FILE_ACCEPT = "image/jpeg,image/png,image/webp,video/mp4,video/quicktime,application/pdf,.csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 // ---- fallback local (dev/preview) ----
 const _ls = {
@@ -494,6 +500,8 @@ const db = {
   // Anexo enviado pelo fornecedor. Lança erro com mensagem amigável se não der certo.
   // `preview` é uma URL local só para a miniatura (o visitante não lê /api/files).
   async uploadPublicFile(file) {
+    const ext = (String(file.name || "").toLowerCase().match(/\.([a-z0-9]+)$/) || [])[1] || "";
+    if (!PUBLIC_FILE_EXT.includes(ext)) throw new Error(`"${file.name}": formato não aceito. Use ${PUBLIC_FILE_FORMATOS}.`);
     if (file.size > PUBLIC_FILE_MAX) throw new Error(`"${file.name}" passa de 10 MB.`);
     const dataUrl = await readAsDataURL(file);
     const preview = (file.type || "").match(/^(image|video)\//) ? URL.createObjectURL(file) : "";
@@ -501,8 +509,9 @@ const db = {
       const comma = dataUrl.indexOf(",");
       const r = await apiJSON("POST", "/api/public/files", { name: file.name, type: file.type || "", size: file.size, data: dataUrl.slice(comma + 1) })
         .catch(() => null);
-      if (r && r.ok) { const j = await r.json(); return { id: j.id, name: file.name, type: file.type || "", size: file.size, url: j.url, preview }; }
-      if (r && r.status === 415) throw new Error(`"${file.name}": formato não aceito. Use JPG, PNG, WEBP, MP4, MOV ou PDF.`);
+      // O servidor devolve o tipo canônico (ex.: .csv vira text/csv mesmo se o Windows disser "vnd.ms-excel").
+      if (r && r.ok) { const j = await r.json(); return { id: j.id, name: file.name, type: j.type || file.type || "", size: file.size, url: j.url, preview }; }
+      if (r && r.status === 415) throw new Error(`"${file.name}": formato não aceito. Use ${PUBLIC_FILE_FORMATOS}.`);
       if (r && r.status === 413) throw new Error(`"${file.name}" passa de 10 MB.`);
       throw new Error(`Não foi possível enviar "${file.name}". Tente novamente.`);
     }
@@ -1517,7 +1526,7 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
                       <div className="h-24 flex items-center justify-center bg-gray-50">
                         {isImg ? <img src={a.url} alt={a.name} className="h-full w-full object-cover" />
                           : isVid ? <video src={a.url} className="h-full w-full object-cover" muted />
-                            : <div style={{ color: C.coral }}>{isPdf ? <FileIcon size={26} /> : <Paperclip size={26} />}</div>}
+                            : <div style={{ color: C.coral }}>{isPdf ? <FileIcon size={26} /> : ehPlanilha(a) ? <FileSpreadsheet size={26} style={{ color: C.green }} /> : <Paperclip size={26} />}</div>}
                       </div>
                       <div className="p-2">
                         <div className="text-xs font-medium truncate" style={{ color: C.text }}>{a.name}</div>
@@ -1894,8 +1903,8 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
             <p className="text-sm mb-4" style={{ color: C.muted }}>Envie os documentos da sua empresa e indique o que precisa receber da gocase.</p>
 
             <div className="text-xs font-semibold mb-2 flex items-center gap-1" style={{ color: C.text }}><Send size={13} /> Enviar meus documentos</div>
-            <FileUpload key={uploadKey} initial={meusDocs} onFiles={setMeusDocs} upload={(file) => db.uploadPublicFile(file)}
-              hint="Clique ou arraste para adicionar — imagens (JPG, PNG, WEBP), vídeos (MP4, MOV) e PDF, até 10 MB cada" />
+            <FileUpload key={uploadKey} initial={meusDocs} onFiles={setMeusDocs} upload={(file) => db.uploadPublicFile(file)} accept={PUBLIC_FILE_ACCEPT}
+              hint="Clique ou arraste para adicionar — imagens (JPG, PNG, WEBP), vídeos (MP4, MOV), PDF e planilhas (CSV, XLSX), até 10 MB cada" />
 
             <div className="text-xs font-semibold mt-5 mb-2 flex items-center gap-1" style={{ color: C.text }}><Download size={13} /> Solicitar da gocase</div>
             {docsDisponiveis.length === 0 ? (
