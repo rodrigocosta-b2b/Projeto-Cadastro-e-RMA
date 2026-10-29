@@ -592,7 +592,25 @@ const db = {
     const r = (_ls.get(REQ_KEY, []) || []).find(x => x.acessoToken === acesso);
     if (!r) return null;
     return { id: r.id, status: r.status, abertura: r.abertura, prazo: r.prazo, ultimaAtualiz: r.ultimaAtualiz || r.abertura, parceiro: r.parceiro,
-      chat: (r.chat || []).map(m => ({ ...m, role: m.role === "cliente" ? "cliente" : "equipe" })), entregues: _entregaLocal(r) };
+      chat: (r.chat || []).map(m => ({ ...m, role: m.role === "cliente" ? "cliente" : "equipe", autor: m.role === "cliente" ? nomeSolicitante(r) : m.autor,
+        editada: !!m.editadaTs && !m.excluida, texto: m.excluida ? "" : m.texto, arquivos: m.excluida ? [] : m.arquivos })), entregues: _entregaLocal(r) };
+  },
+  // Solicitante edita ({ texto }) ou exclui (texto === null) uma mensagem dele no chat.
+  async publicAlterarMensagem(acesso, msgId, texto) {
+    const excluir = texto === null;
+    if ((await dbMode()) === "remote") {
+      try {
+        const r = await apiJSON(excluir ? "DELETE" : "PATCH", `/api/public/chamado/${encodeURIComponent(acesso)}/mensagens/${encodeURIComponent(msgId)}`, excluir ? undefined : { texto });
+        return r.ok;
+      } catch (e) { return false; }
+    }
+    const r = (_ls.get(REQ_KEY, []) || []).find(x => x.acessoToken === acesso);
+    const m = r && (r.chat || []).find(x => x.id === msgId && x.role === "cliente" && !x.excluida);
+    if (!m) return false;
+    const now = Date.now();
+    const novo = excluir ? { ...m, texto: "", arquivos: [], excluida: true, excluidaTs: now, alteradoTs: now } : { ...m, texto, editadaTs: now, alteradoTs: now };
+    _ls.upsert(REQ_KEY, { ...r, chat: r.chat.map(x => (x.id === msgId ? novo : x)) }, "id");
+    return true;
   },
   // Mensagem do fornecedor no chat (o servidor define autor, reabre se encerrado e avisa a equipe).
   async publicEnviarMensagem(acesso, { texto, arquivos }) {
@@ -606,12 +624,12 @@ const db = {
     }
     const r = (_ls.get(REQ_KEY, []) || []).find(x => x.acessoToken === acesso);
     if (!r) return { ok: false };
-    const now = Date.now(), autor = r.dados?.nomeContato || r.parceiro || "Fornecedor";
+    const now = Date.now(), autor = nomeSolicitante(r);
     const reaberto = ["CONCLUIDA", "NEGADA"].includes(r.status);
     const novo = { ...r, chat: [...(r.chat || []), { id: `msg-${now}`, ts: now, role: "cliente", autor, texto, arquivos: limpos, viaPortal: true }], ultimaAtualiz: new Date(now).toLocaleString("pt-BR"), ultimaAtualizTs: now,
-      ...(reaberto ? { status: "EM_ANALISE", movimentos: [...(r.movimentos || []), { status: "EM_ANALISE", actor: "cliente", who: autor, ts: now, text: "Chamado reaberto automaticamente por nova mensagem do fornecedor." }] } : {}) };
+      ...(reaberto ? { status: "EM_ANALISE", movimentos: [...(r.movimentos || []), { status: "EM_ANALISE", actor: "cliente", who: autor, ts: now, text: "Chamado reaberto automaticamente por nova mensagem do solicitante." }] } : {}) };
     _ls.upsert(REQ_KEY, novo, "id");
-    _ls.upsert(NOTIF_KEY, { id: `n-${now}`, ts: now, read: false, audience: "interno", requestId: r.id, color: C.cyan, message: `Nova mensagem do fornecedor no chamado ${r.id}: "${texto.slice(0, 60)}"` }, "id");
+    _ls.upsert(NOTIF_KEY, { id: `n-${now}`, ts: now, read: false, audience: "interno", requestId: r.id, color: C.cyan, message: `Nova mensagem do solicitante no chamado ${r.id}: "${texto.slice(0, 60)}"` }, "id");
     return { ok: true, reaberto, status: novo.status };
   },
   // Base de clientes gocase (Datamart / Reseller) — só para a equipe logada.
@@ -752,6 +770,14 @@ function cnpjValido(v) {
   return dv(12) === Number(d[12]) && dv(13) === Number(d[13]);
 }
 const emailValido = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(e || "").trim()); // igual ao worker
+// "karliene.oliveira@gocase.com" → "Karliene Oliveira" (igual a nomeDoEmail no worker).
+function nomeDoEmail(email) {
+  const local = String(email || "").split("@")[0].split("+")[0];
+  return local.split(/[._\-+\d]+/).filter(Boolean)
+    .map((p, i) => (i > 0 && ["da", "de", "do", "das", "dos", "e"].includes(p.toLowerCase()) ? p.toLowerCase() : p.charAt(0).toUpperCase() + p.slice(1).toLowerCase())).join(" ");
+}
+// Nome do solicitante mostrado no chat (vem do e-mail dele).
+const nomeSolicitante = (r) => nomeDoEmail(r?.emailSolicitante) || r?.dados?.nomeContato || r?.parceiro || "Solicitante";
 const fmtCnpjInput = (v) => {
   const d = String(v || "").replace(/\D/g, "").slice(0, 14);
   return d.replace(/^(\d{2})(\d)/, "$1.$2").replace(/^(\d{2})\.(\d{3})(\d)/, "$1.$2.$3").replace(/\.(\d{3})(\d)/, ".$1/$2").replace(/(\d{4})(\d)/, "$1-$2");
@@ -871,7 +897,7 @@ const AuthShell = ({ children }) => (
         <div className="text-3xl font-extrabold lowercase tracking-tight">gocase</div>
         <div>
           <div className="text-2xl font-bold leading-snug">Cadastro de Fornecedores</div>
-          <p className="mt-3 text-sm opacity-90 leading-relaxed">Solicitação de cadastro e homologação de fornecedores gocase, com acompanhamento de ponta a ponta.</p>
+          <p className="mt-3 text-sm opacity-90 leading-relaxed">Solicitações de cadastro da gocase (BB Indústria e Go Comércio) como fornecedora, com acompanhamento de ponta a ponta.</p>
         </div>
         <div className="text-xs opacity-70">© 2026 gocase</div>
       </div>
@@ -987,7 +1013,7 @@ function ConsultaStatus() {
   if (aberto) return <ChamadoFornecedor acesso={aberto} onVoltar={() => { setAberto(null); consultar(); }} />;
   return (
     <div>
-      <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Fornecedor</div>
+      <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Solicitante</div>
       <h1 className="text-2xl font-bold" style={{ color: C.text }}>Acompanhar solicitação</h1>
       <p className="text-sm mb-5" style={{ color: C.muted }}>Basta preencher <b style={{ color: C.text }}>um</b> dos campos para abrir o chamado, ver os documentos e conversar com a equipe. Com o seu e-mail ou o CNPJ aparecem todas as suas solicitações.</p>
       <Card className="p-5 mb-4">
@@ -1039,6 +1065,8 @@ function ChamadoFornecedor({ acesso, onVoltar }) {
     const t = setInterval(() => { if (!document.hidden) carregar(); }, 20000);
     return () => clearInterval(t);
   }, [acesso]);
+  // Edita (texto) ou exclui (null) uma mensagem do próprio solicitante e recarrega o chat.
+  const alterar = async (msgId, texto) => { const ok = await db.publicAlterarMensagem(acesso, msgId, texto); if (ok) await carregar(); return ok; };
   const enviar = async (msg) => {
     const res = await db.publicEnviarMensagem(acesso, msg);
     if (res.ok) await carregar();
@@ -1055,7 +1083,7 @@ function ChamadoFornecedor({ acesso, onVoltar }) {
   return (
     <div>
       <button onClick={onVoltar} className="flex items-center gap-1 text-sm mb-3" style={{ color: C.muted }}><ArrowLeft size={15} /> Voltar para a consulta</button>
-      <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Fornecedor</div>
+      <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Solicitante</div>
       <div className="flex items-center gap-3 flex-wrap mb-1">
         <h1 className="text-2xl font-bold font-mono" style={{ color: C.text }}>{ch.id}</h1>
         <Pill label={st.label} color={st.color} />
@@ -1068,7 +1096,7 @@ function ChamadoFornecedor({ acesso, onVoltar }) {
           ))}
         </div>
       </Card>
-      <ChatPanel r={ch} fornecedor onEnviar={enviar} />
+      <ChatPanel r={ch} fornecedor onEnviar={enviar} onEditar={(msg, t) => alterar(msg.id, t)} onExcluir={(msg) => alterar(msg.id, null)} />
       <DocsLiberados entregues={ch.entregues || []} />
     </div>
   );
@@ -1150,7 +1178,7 @@ function Shell({ portal, view, nav, onLogout, notifOpen, setNotifOpen, user, not
         </div>
         <div className="flex-1 max-w-xl relative" ref={searchBoxRef}>
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 opacity-70" />
-          <input placeholder="Busca global — nº da solicitação, CNPJ, fornecedor…"
+          <input placeholder="Busca global — nº da solicitação, CNPJ, solicitante…"
             value={q}
             onChange={e => { setQ(e.target.value); setQOpen(true); }}
             onFocus={() => q.trim().length >= 2 && setQOpen(true)}
@@ -1217,7 +1245,7 @@ function Shell({ portal, view, nav, onLogout, notifOpen, setNotifOpen, user, not
             md:translate-x-0 md:sticky md:top-16 md:bottom-auto md:min-h-[calc(100vh-4rem)]`}
           style={{ borderColor: C.line, background: C.surface }}>
           <div className="px-3 py-2 text-[11px] font-bold uppercase tracking-wider" style={{ color: C.muted }}>
-            {portal === "externo" ? "Portal do Fornecedor" : "Portal Interno"}
+            {portal === "externo" ? "Portal do Solicitante" : "Portal Interno"}
           </div>
           {MENU[portal].filter(it => !it.roles || it.roles.includes(user?.role)).map(it => {
             const active = view === it.id;
@@ -1364,10 +1392,10 @@ function buildTimeline(r) {
     if (r.status === "AGUARDANDO") { const ts = r.aguardandoTs || (aberturaTs + 3 * 3600000); ev.push({ status: "AGUARDANDO", actor: "user", who: r.resp, ts, when: fmtTs(ts), text: "Aguardando informações ou documentos complementares." }); }
     if (r.status === "APROVADA" || r.status === "CONCLUIDA") { const ts = r.aprovadoTs || r.ultimaAtualizTs || parseBR(r.prazo) || (aberturaTs + 4 * 3600000); ev.push({ status: "APROVADA", actor: "user", who: r.resp, ts, when: fmtTs(ts), text: r.msgAprovacao || "Solicitação aprovada." }); }
     if (r.status === "NEGADA" && r.resp !== "IA") { const ts = r.negadoTs || r.ultimaAtualizTs || parseBR(r.prazo) || (aberturaTs + 4 * 3600000); ev.push({ status: "NEGADA", actor: "user", who: r.resp, ts, when: fmtTs(ts), text: r.msgNegativa || "Solicitação negada." }); }
-    if (r.status === "CONCLUIDA") { const ts = r.concluidoTs || r.finalizadoTs || (aberturaTs + 5 * 3600000); ev.push({ status: "CONCLUIDA", actor: "user", who: r.resp, ts, when: fmtTs(ts), text: "Processo concluído e fornecedor comunicado." }); }
+    if (r.status === "CONCLUIDA") { const ts = r.concluidoTs || r.finalizadoTs || (aberturaTs + 5 * 3600000); ev.push({ status: "CONCLUIDA", actor: "user", who: r.resp, ts, when: fmtTs(ts), text: "Processo concluído e solicitante comunicado." }); }
   }
   if (Array.isArray(r.chat) && r.chat.length > 0) {
-    r.chat.forEach(msg => ev.push({ status: r.status, actor: msg.role === "cliente" ? "cliente" : "user", who: msg.autor, ts: msg.ts, when: fmtTs(msg.ts), text: `💬 ${msg.texto}`, isChat: true }));
+    r.chat.forEach(msg => ev.push({ status: r.status, actor: msg.role === "cliente" ? "cliente" : "user", who: msg.role === "cliente" ? nomeSolicitante(r) : msg.autor, ts: msg.ts, when: fmtTs(msg.ts), text: msg.excluida ? "💬 Mensagem apagada" : `💬 ${msg.texto}${msg.editadaTs ? " (editada)" : ""}`, isChat: true }));
   }
   return ev.sort((a, b) => (a.ts || 0) - (b.ts || 0));
 }
@@ -1421,25 +1449,31 @@ function SLAPanel({ r }) {
 /* Chat do chamado, o mesmo para os dois lados:
    - equipe (padrão): mensagem sai como "equipe" via onSendMsg(reqId, msg); "minha" = do
      usuário logado (cada atendente aparece separado);
-   - fornecedor (`fornecedor`): usado em "Acompanhar solicitação"; mensagem sai como
+   - solicitante (`fornecedor`): usado em "Acompanhar solicitação"; mensagem sai como
      "cliente" via onEnviar(msg) (servidor grava, reabre se encerrado e avisa a equipe);
-     anexos sobem pela rota pública. */
-function ChatPanel({ r, currentUser, onSendMsg, onReopenRequest, fornecedor = false, onEnviar }) {
+     anexos sobem pela rota pública.
+   Cada um edita/exclui só as PRÓPRIAS mensagens (onEditar(msg, texto) / onExcluir(msg));
+   a excluída vira "Mensagem apagada". As do solicitante aparecem com o nome tirado do
+   e-mail dele (nomeSolicitante). */
+function ChatPanel({ r, currentUser, onSendMsg, onReopenRequest, fornecedor = false, onEnviar, onEditar, onExcluir }) {
   const [texto, setTexto] = useState("");
   const [arquivos, setArquivos] = useState([]);
   const [enviando, setEnviando] = useState(false);
   const [subindo, setSubindo] = useState(false);
   const [erro, setErro] = useState("");
+  const [editando, setEditando] = useState(null); // { id, texto }
   const endRef = useRef(null);
   const msgs = Array.isArray(r.chat) ? r.chat : [];
   const isClosed = ["CONCLUIDA", "NEGADA"].includes(r.status);
   const isInternal = !fornecedor && isInterno(currentUser?.role);
-  const ehMinha = (msg) => (fornecedor ? msg.role === "cliente" : msg.autor === currentUser?.name);
+  const ehMinha = (msg) => (fornecedor ? msg.role === "cliente"
+    : msg.role !== "cliente" && (msg.autorEmail ? msg.autorEmail === currentUser?.email : msg.autor === currentUser?.name));
+  const autorDe = (msg) => (msg.role === "cliente" ? (fornecedor ? msg.autor : nomeSolicitante(r)) || msg.autor : msg.autor);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, [msgs.length]);
   const enviar = async () => {
     const t = texto.trim();
     if ((!t && arquivos.length === 0) || enviando) return;
-    const msg = { id: `msg-${Date.now()}`, ts: Date.now(), role: isInternal ? "equipe" : "cliente", autor: currentUser?.name || "Usuário", texto: t, arquivos: arquivos.map(f => ({ name: f.name, url: f.url, type: f.type })) };
+    const msg = { id: `msg-${Date.now()}`, ts: Date.now(), role: isInternal ? "equipe" : "cliente", autor: currentUser?.name || "Usuário", autorEmail: currentUser?.email || "", texto: t, arquivos: arquivos.map(f => ({ name: f.name, url: f.url, type: f.type })) };
     setErro("");
     if (fornecedor) {
       setEnviando(true);
@@ -1451,6 +1485,20 @@ function ChatPanel({ r, currentUser, onSendMsg, onReopenRequest, fornecedor = fa
       if (isClosed && !isInternal) onReopenRequest(r.id, msg);
     }
     setTexto(""); setArquivos([]);
+  };
+  const salvarEdicao = async () => {
+    const t = (editando?.texto || "").trim();
+    const msg = msgs.find(m => m.id === editando?.id);
+    if (!msg) { setEditando(null); return; }
+    if (!t && !(msg.arquivos || []).length) { setErro("A mensagem não pode ficar vazia — use Excluir."); return; }
+    const ok = await onEditar(msg, t);
+    if (ok === false) { setErro("Não foi possível editar agora. Tente novamente."); return; }
+    setErro(""); setEditando(null);
+  };
+  const excluir = async (msg) => {
+    if (!window.confirm("Excluir esta mensagem? Ela some para todos e aparece como \"Mensagem apagada\".")) return;
+    const ok = await onExcluir(msg);
+    if (ok === false) setErro("Não foi possível excluir agora. Tente novamente.");
   };
   const anexar = async (e) => {
     const lista = Array.from(e.target.files || []); e.target.value = "";
@@ -1469,21 +1517,46 @@ function ChatPanel({ r, currentUser, onSendMsg, onReopenRequest, fornecedor = fa
       <div className="flex items-center gap-2 px-5 py-3 border-b flex-wrap" style={{ borderColor: C.line }}>
         <MessageSquare size={16} style={{ color: C.coral }} />
         <h2 className="font-bold text-sm" style={{ color: C.text }}>{fornecedor ? "Chat com a equipe gocase" : "Chat do chamado"}</h2>
-        {!fornecedor && <span className="text-[11px]" style={{ color: C.muted }}>· visível para o fornecedor em "Acompanhar solicitação"</span>}
-        {isClosed && <span className="ml-auto text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: C.coralSoft, color: C.coral }}>{isInternal ? "Encerrado — uma mensagem do fornecedor reabre" : "Encerrado — envie uma mensagem para reabrir"}</span>}
+        {!fornecedor && <span className="text-[11px]" style={{ color: C.muted }}>· visível para o solicitante em "Acompanhar solicitação"</span>}
+        {isClosed && <span className="ml-auto text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: C.coralSoft, color: C.coral }}>{isInternal ? "Encerrado — uma mensagem do solicitante reabre" : "Encerrado — envie uma mensagem para reabrir"}</span>}
       </div>
       <div className="flex-1 overflow-y-auto p-4 space-y-3" style={{ maxHeight: 320 }}>
         {msgs.length === 0 && <div className="text-center text-sm py-8" style={{ color: C.muted }}>{fornecedor ? "Nenhuma mensagem ainda. Escreva aqui para falar com a equipe de cadastro da gocase." : "Nenhuma mensagem ainda. Use o chat para comunicação direta sobre este chamado."}</div>}
         {msgs.map((msg) => {
           const isMine = ehMinha(msg);
+          const apagada = !!msg.excluida;
+          const editada = !apagada && (msg.editada || !!msg.editadaTs);
+          const emEdicao = editando?.id === msg.id;
           return (
             <div key={msg.id} className={`flex ${isMine ? "justify-end" : "justify-start"}`}>
               <div className="max-w-[80%]">
-                <div className="text-[10px] mb-1" style={{ color: C.muted, textAlign: isMine ? "right" : "left" }}>{msg.autor}{!fornecedor && msg.role === "cliente" ? " (fornecedor)" : ""} · {fmtMsgTime(msg.ts)}</div>
-                <div className="rounded-2xl px-4 py-2.5 text-sm" style={{ background: isMine ? C.coral : C.bg, color: isMine ? "white" : C.text, border: isMine ? "none" : `1px solid ${C.line}`, borderRadius: isMine ? "18px 18px 4px 18px" : "18px 18px 18px 4px" }}>
-                  {msg.texto && <p className="whitespace-pre-wrap break-words">{msg.texto}</p>}
-                  {msg.arquivos?.length > 0 && <div className="mt-2 space-y-1">{msg.arquivos.map((f, i) => <button key={i} onClick={() => abrirDoc(f, null)} className="flex items-center gap-1 text-xs underline opacity-90 text-left"><Paperclip size={11} className="shrink-0" />{f.name}</button>)}</div>}
+                <div className="text-[10px] mb-1" style={{ color: C.muted, textAlign: isMine ? "right" : "left" }}>
+                  {autorDe(msg)}{!fornecedor && msg.role === "cliente" ? " (solicitante)" : ""} · {fmtMsgTime(msg.ts)}{editada ? " · editada" : ""}
                 </div>
+                {apagada ? (
+                  <div className="rounded-2xl px-4 py-2 text-xs italic" style={{ color: C.muted, border: `1px dashed ${C.line}` }}>Mensagem apagada</div>
+                ) : emEdicao ? (
+                  <div className="rounded-2xl p-2 border" style={{ borderColor: C.coral, background: C.surface }}>
+                    <textarea value={editando.texto} onChange={e => setEditando(s => ({ ...s, texto: e.target.value }))} rows={3} maxLength={4000} autoFocus
+                      onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); salvarEdicao(); } if (e.key === "Escape") setEditando(null); }}
+                      className="w-full rounded-xl border px-3 py-2 text-sm resize-none bg-white" style={{ borderColor: C.line }} />
+                    <div className="flex gap-3 justify-end text-xs font-semibold mt-1">
+                      <button onClick={() => setEditando(null)} style={{ color: C.muted }}>Cancelar</button>
+                      <button onClick={salvarEdicao} style={{ color: C.coral }}>Salvar</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-2xl px-4 py-2.5 text-sm" style={{ background: isMine ? C.coral : C.bg, color: isMine ? "white" : C.text, border: isMine ? "none" : `1px solid ${C.line}`, borderRadius: isMine ? "18px 18px 4px 18px" : "18px 18px 18px 4px" }}>
+                    {msg.texto && <p className="whitespace-pre-wrap break-words">{msg.texto}</p>}
+                    {msg.arquivos?.length > 0 && <div className="mt-2 space-y-1">{msg.arquivos.map((f, i) => <button key={i} onClick={() => abrirDoc(f, null)} className="flex items-center gap-1 text-xs underline opacity-90 text-left"><Paperclip size={11} className="shrink-0" />{f.name}</button>)}</div>}
+                  </div>
+                )}
+                {isMine && !apagada && !emEdicao && (onEditar || onExcluir) && (
+                  <div className="flex gap-3 justify-end mt-1 text-[11px] font-semibold">
+                    {onEditar && <button onClick={() => { setErro(""); setEditando({ id: msg.id, texto: msg.texto || "" }); }} style={{ color: C.muted }}>Editar</button>}
+                    {onExcluir && <button onClick={() => excluir(msg)} style={{ color: C.danger }}>Excluir</button>}
+                  </div>
+                )}
               </div>
             </div>
           );
@@ -1582,7 +1655,7 @@ function DocEnvioItem({ d, acervo, interno, onLiberar, onCancelar }) {
             <button onClick={() => onCancelar(d.docId)} style={{ color: C.danger }}>Cancelar envio</button>
           ) : (
             <>
-              {conteudo && <button onClick={() => onLiberar(d.docId, null)} className="inline-flex items-center gap-1" style={{ color: C.green }}><Send size={12} /> Enviar ao fornecedor</button>}
+              {conteudo && <button onClick={() => onLiberar(d.docId, null)} className="inline-flex items-center gap-1" style={{ color: C.green }}><Send size={12} /> Enviar ao solicitante</button>}
               <button onClick={() => !enviando && fileRef.current?.click()} className="inline-flex items-center gap-1" style={{ color: C.coral }}>
                 {enviando ? <Loader2 size={12} className="animate-spin" /> : <Paperclip size={12} />} {conteudo ? "Anexar outro arquivo e enviar" : "Anexar arquivo e enviar"}
               </button>
@@ -1595,7 +1668,7 @@ function DocEnvioItem({ d, acervo, interno, onLiberar, onCancelar }) {
 }
 
 /* ===================== Detalhe ===================== */
-function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopenRequest, acervo, onLiberarDoc, onCancelarEnvio, toast }) {
+function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopenRequest, onEditMsg, onDeleteMsg, acervo, onLiberarDoc, onCancelarEnvio, toast }) {
   if (!r) return null;
   const tl = buildTimeline(r);
   return (
@@ -1611,7 +1684,7 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
         <div className="lg:col-span-2 space-y-5">
           <Card className="p-5">
             <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
-              <h2 className="font-bold" style={{ color: C.text }}>Dados do fornecedor</h2>
+              <h2 className="font-bold" style={{ color: C.text }}>Dados do solicitante</h2>
               {r.dados?.fonte && <span className="text-[11px]" style={{ color: C.muted }}>Fonte: {r.dados.fonte}</span>}
             </div>
             <div className="grid grid-cols-2 gap-3 text-sm">
@@ -1634,7 +1707,7 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
           </Card>
           {interno && <ResellerCard cnpj={r.cnpj} />}
           <Card className="p-5">
-            <h2 className="font-bold mb-3" style={{ color: C.text }}>Anexos enviados pelo fornecedor</h2>
+            <h2 className="font-bold mb-3" style={{ color: C.text }}>Anexos enviados pelo solicitante</h2>
             {(r.anexos && r.anexos.length > 0) ? (
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 {r.anexos.map((a, i) => {
@@ -1657,7 +1730,7 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
                 })}
               </div>
             ) : (
-              <p className="text-sm" style={{ color: C.muted }}>Nenhum anexo enviado pelo fornecedor nesta solicitação.</p>
+              <p className="text-sm" style={{ color: C.muted }}>Nenhum anexo enviado pelo solicitante nesta solicitação.</p>
             )}
           </Card>
           {/* Mensagem do fornecedor — visível para equipe interna */}
@@ -1665,7 +1738,7 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
             <Card className="p-5" style={{ borderColor: C.cyan + "50", background: C.cyan + "08" }}>
               <div className="flex items-center gap-2 mb-2">
                 <MessageSquare size={16} style={{ color: C.cyan }} />
-                <h2 className="font-bold text-sm" style={{ color: C.text }}>Mensagem do fornecedor</h2>
+                <h2 className="font-bold text-sm" style={{ color: C.text }}>Mensagem do solicitante</h2>
               </div>
               <p className="text-sm whitespace-pre-wrap" style={{ color: C.text }}>
                 {r.mensagemCadastro || r.problema}
@@ -1675,15 +1748,15 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
           {((r.docsEnviados && r.docsEnviados.length > 0) || (r.docsSolicitados && r.docsSolicitados.length > 0) || (r.docsNaoEncontrados && r.docsNaoEncontrados.length > 0)) && (
             <Card className="p-5">
               <div className="flex items-start justify-between gap-2 flex-wrap mb-1">
-                <h2 className="font-bold" style={{ color: C.text }}>Documentos que o fornecedor pediu à gocase</h2>
+                <h2 className="font-bold" style={{ color: C.text }}>Documentos que o solicitante pediu à gocase</h2>
                 {interno && (r.docsEnviados || []).some(d => d.liberado || d.automatico) && (
                   <button onClick={() => {
                     const txt = `Olá! Os documentos da gocase da sua solicitação ${r.id} estão disponíveis para download em ${window.location.origin} → "Acompanhar solicitação" (protocolo ${r.id} e CNPJ ${r.cnpj}).`;
-                    try { navigator.clipboard.writeText(txt).then(() => toast && toast("Aviso copiado — cole no e-mail ou WhatsApp do fornecedor."), () => toast && toast(txt)); } catch (e) { toast && toast(txt); }
-                  }} className="text-xs font-semibold inline-flex items-center gap-1" style={{ color: C.coral }}><Mail size={13} /> Copiar aviso para o fornecedor</button>
+                    try { navigator.clipboard.writeText(txt).then(() => toast && toast("Aviso copiado — cole no e-mail ou WhatsApp do solicitante."), () => toast && toast(txt)); } catch (e) { toast && toast(txt); }
+                  }} className="text-xs font-semibold inline-flex items-center gap-1" style={{ color: C.coral }}><Mail size={13} /> Copiar aviso para o solicitante</button>
                 )}
               </div>
-              <p className="text-xs mb-3" style={{ color: C.muted }}>Os de <b>envio automático</b> já foram liberados ao enviar a solicitação. Os demais: clique em <b>Enviar ao fornecedor</b> — ele baixa em "Acompanhar solicitação" (protocolo + CNPJ).</p>
+              <p className="text-xs mb-3" style={{ color: C.muted }}>Os de <b>envio automático</b> já foram liberados ao enviar a solicitação. Os demais: clique em <b>Enviar ao solicitante</b> — ele baixa em "Acompanhar solicitação" (protocolo + CNPJ).</p>
               {r.docsEnviados && r.docsEnviados.length > 0 ? (
                 <div className="grid sm:grid-cols-2 gap-2">
                   {r.docsEnviados.map((d, i) => (
@@ -1698,13 +1771,13 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
               )}
               {r.docsNaoEncontrados && r.docsNaoEncontrados.length > 0 && (
                 <div className="mt-3 rounded-xl border px-3 py-2.5 text-xs" style={{ borderColor: C.yellow + "66", background: C.yellow + "12", color: C.text }}>
-                  <div className="font-semibold mb-1 flex items-center gap-1"><AlertTriangle size={13} style={{ color: C.yellow }} /> Itens da lista do fornecedor que não estão no acervo</div>
+                  <div className="font-semibold mb-1 flex items-center gap-1"><AlertTriangle size={13} style={{ color: C.yellow }} /> Itens da lista do solicitante que não estão no acervo</div>
                   {r.docsNaoEncontrados.join(" · ")}
                 </div>
               )}
               {r.listaDocumentos && (
                 <details className="mt-3 text-xs" style={{ color: C.muted }}>
-                  <summary className="cursor-pointer font-semibold">Lista colada pelo fornecedor</summary>
+                  <summary className="cursor-pointer font-semibold">Lista colada pelo solicitante</summary>
                   <pre className="mt-2 whitespace-pre-wrap font-sans" style={{ color: C.text }}>{r.listaDocumentos}</pre>
                 </details>
               )}
@@ -1731,7 +1804,7 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
               )}
             </div>
           )}
-          <ChatPanel r={r} currentUser={currentUser} onSendMsg={onSendMsg} onReopenRequest={onReopenRequest} />
+          <ChatPanel r={r} currentUser={currentUser} onSendMsg={onSendMsg} onReopenRequest={onReopenRequest} onEditar={(msg, t) => onEditMsg(r.id, msg.id, t)} onExcluir={(msg) => onDeleteMsg(r.id, msg.id)} />
         </div>
         <Card className="p-5 self-start">
           <h2 className="font-bold mb-4" style={{ color: C.text }}>Linha do tempo</h2>
@@ -1916,7 +1989,7 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
 
   if (protocolo) return (
     <div>
-      <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Fornecedor</div>
+      <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Solicitante</div>
       <h1 className="text-2xl font-bold mb-5" style={{ color: C.text }}>Solicitação enviada!</h1>
       <Stepper step={4} labels={["Identificação", "Documentos", "Revisão"]} />
       <Card className="p-6 text-center" style={{ borderColor: C.green + "55" }}>
@@ -1938,7 +2011,7 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
 
   return (
     <div>
-      <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Fornecedor</div>
+      <div className="text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: C.muted }}>Solicitante</div>
       <h1 className="text-2xl font-bold" style={{ color: C.text }}>Solicitação de Cadastro</h1>
       <p className="text-sm mb-5" style={{ color: C.muted }}>Informe o CNPJ da empresa para iniciar o processo de homologação junto à gocase. Não é preciso criar conta.</p>
       <Stepper step={step} labels={["Identificação", "Documentos", "Revisão"]} />
@@ -2098,7 +2171,7 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
               <textarea
                 value={mensagem}
                 onChange={e => setMensagem(e.target.value)}
-                placeholder="Ex.: Somos fornecedores de embalagens e gostaríamos de nos cadastrar para participar das próximas cotações da gocase..."
+                placeholder="Ex.: Somos uma rede de lojas e queremos cadastrar a gocase como fornecedora para começar a comprar os produtos..."
                 rows={4}
                 maxLength={4000}
                 className="w-full rounded-xl border px-3 py-2.5 text-sm resize-none bg-white"
@@ -2306,7 +2379,7 @@ function IntDash({ nav, requests }) {
       <div className="flex flex-wrap items-start justify-between gap-3 mb-5">
         <div>
           <h1 className="text-2xl font-bold" style={{ color: C.text }}>Dashboard</h1>
-          <p className="text-sm" style={{ color: C.muted }}>Indicadores dos cadastros de fornecedores em tempo real.</p>
+          <p className="text-sm" style={{ color: C.muted }}>Indicadores das solicitações de cadastro em tempo real.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {/* Período */}
@@ -2634,7 +2707,7 @@ function IntLista({ nav, requests, tipo, titulo, onMoverStatus }) {
       {viewMode === "board" ? (
         <KanbanBoard rows={rows} nav={nav} onMover={onMoverStatus} />
       ) : (
-        <Card><DataTable rows={rows} cols={["Número", "Fornecedor", "UF", "Status", "SLA", "Responsável", ""]} onRow={r => nav("detalhe", r.id)} render={r => (
+        <Card><DataTable rows={rows} cols={["Número", "Solicitante", "UF", "Status", "SLA", "Responsável", ""]} onRow={r => nav("detalhe", r.id)} render={r => (
           <>
             <td className="px-4 py-3 font-mono font-semibold" style={{ color: C.coral }}>{r.id}</td>
             <td className="px-4 py-3" style={{ color: C.text }}>{r.parceiro}</td>
@@ -3115,7 +3188,7 @@ function Config({ toast, templates, onSaveTemplates }) {
 function Modal({ kind, onConfirm, onClose }) {
   const [obs, setObs] = React.useState("");
   const map = {
-    aprovar:     { title: "Aprovar solicitação",               color: C.green,    fields: ["Código do fornecedor no ERP (opcional)", "Observações internas"], cta: "Confirmar aprovação",         status: "APROVADA"    },
+    aprovar:     { title: "Aprovar solicitação",               color: C.green,    fields: ["Observações internas"], cta: "Confirmar aprovação",         status: "APROVADA"    },
     negar:       { title: "Negar solicitação",                 color: C.danger,    fields: ["Motivo da negativa"],                                                          cta: "Confirmar negativa",           status: "NEGADA"      },
     ajuste:      { title: "Solicitar ajuste",                  color: C.yellow,   fields: ["O que precisa ser corrigido / enviado"],                                       cta: "Enviar solicitação de ajuste", status: "AGUARDANDO"  },
     concluir:    { title: "Concluir solicitação",              color: C.violet,   fields: ["Observações finais"],                                                           cta: "Concluir",                     status: "CONCLUIDA"   },
@@ -3232,7 +3305,7 @@ function AcervoDocs({ acervo, onAdd, onUpdate, onRemove, toast }) {
     <div className="max-w-3xl">
       <h1 className="text-2xl font-bold" style={{ color: C.text }}>Acervo de documentos para cadastro</h1>
       <p className="text-sm mb-4" style={{ color: C.muted }}>
-        Documentos que o fornecedor pode pedir no cadastro. Basta o arquivo — o link do Drive é opcional. Informe a <b style={{ color: C.text }}>empresa</b> (BB Indústria ou Go Comércio): o fornecedor recebe só a versão da empresa que se aplica a ele (isento de IE ou Gift → Go; com IE → BB). Os marcados com <b style={{ color: C.text }}>envio automático</b> ficam disponíveis para download assim que o fornecedor envia a solicitação; os demais a equipe envia depois da análise.
+        Documentos que o solicitante pode pedir no cadastro. Basta o arquivo — o link do Drive é opcional. Informe a <b style={{ color: C.text }}>empresa</b> (BB Indústria ou Go Comércio): o solicitante recebe só a versão da empresa que se aplica a ele (isento de IE ou Gift → Go; com IE → BB). Os marcados com <b style={{ color: C.text }}>envio automático</b> ficam disponíveis para download assim que o solicitante envia a solicitação; os demais a equipe envia depois da análise.
       </p>
 
       <div ref={formRef} />
@@ -3278,7 +3351,7 @@ function AcervoDocs({ acervo, onAdd, onUpdate, onRemove, toast }) {
 
         <div className="mt-4">
           <Field label="Link do Drive (opcional)" value={form.link} onChange={setCampo("link")} full />
-          <p className="text-[11px] mt-1" style={{ color: C.muted }}>Se houver link, o fornecedor recebe o link e o arquivo. Útil quando o arquivo muda com frequência no Drive.</p>
+          <p className="text-[11px] mt-1" style={{ color: C.muted }}>Se houver link, o solicitante recebe o link e o arquivo. Útil quando o arquivo muda com frequência no Drive.</p>
         </div>
 
         <label className="mt-4 flex items-start gap-2 text-sm cursor-pointer" style={{ color: C.text }}>
@@ -3286,7 +3359,7 @@ function AcervoDocs({ acervo, onAdd, onUpdate, onRemove, toast }) {
             className="w-4 h-4 mt-0.5" style={{ accentColor: C.coral }} />
           <span>
             <b>Envio automático</b>
-            <span className="block text-xs" style={{ color: C.muted }}>Liberar para download assim que o fornecedor pedir, sem análise. Use só para documentos que podem ser compartilhados com qualquer solicitante (ex.: Cartão CNPJ, Alvará).</span>
+            <span className="block text-xs" style={{ color: C.muted }}>Liberar para download assim que o solicitante pedir, sem análise. Use só para documentos que podem ser compartilhados com qualquer solicitante (ex.: Cartão CNPJ, Alvará).</span>
           </span>
         </label>
         {form.envioAutomatico && !temConteudo && <div className="text-xs mt-2 font-semibold" style={{ color: C.yellow }}>Anexe o arquivo ou informe o link para o envio automático funcionar.</div>}
@@ -3497,8 +3570,8 @@ export default function App() {
       ? `Documentação submetida ao ${SETOR_LABEL[status]} para análise.${obs ? ` Observação: ${obs}` : ""}`
       : status === "APROVADA"   ? "Cadastro aprovado pela equipe gocase."
       : status === "NEGADA"     ? `Solicitação negada.${obs ? ` Motivo: ${obs}` : ""}`
-      : status === "AGUARDANDO" ? `Aguardando informações ou documentos do fornecedor.${obs ? ` Detalhe: ${obs}` : ""}`
-      : status === "CONCLUIDA"  ? "Processo concluído e fornecedor comunicado."
+      : status === "AGUARDANDO" ? `Aguardando informações ou documentos do solicitante.${obs ? ` Detalhe: ${obs}` : ""}`
+      : status === "CONCLUIDA"  ? "Processo concluído e solicitante comunicado."
       : `Status atualizado para ${STATUS[status]?.label || status}.`;
 
     const mover = { status, actor: "user", who: currentUser?.name || "Equipe gocase", ts: now, text: moveText };
@@ -3556,8 +3629,8 @@ export default function App() {
   const liberarDoc = async (reqId, docId, arquivo) => {
     const item = atualizarDocEnviado(reqId, docId,
       d => ({ ...d, liberado: true, liberadoTs: Date.now(), liberadoPor: currentUser?.name || "Equipe gocase", ...(arquivo ? { arquivoEnviado: arquivo } : {}) }),
-      d => `Documento "${d.nome}" enviado ao fornecedor${arquivo ? ` (arquivo ${arquivo.name})` : ""}.`);
-    if (item) toast(`"${item.nome}" liberado — o fornecedor baixa em Acompanhar solicitação.`);
+      d => `Documento "${d.nome}" enviado ao solicitante${arquivo ? ` (arquivo ${arquivo.name})` : ""}.`);
+    if (item) toast(`"${item.nome}" liberado — o solicitante baixa em Acompanhar solicitação.`);
   };
   const cancelarEnvio = (reqId, docId) => {
     const item = atualizarDocEnviado(reqId, docId,
@@ -3634,8 +3707,21 @@ export default function App() {
     }
   };
   const reopenRequest = () => { };
+  // A equipe edita/exclui só as próprias mensagens (o ChatPanel só oferece nelas); alteradoTs faz
+  // a versão nova prevalecer na mescla do servidor. Excluir não apaga: vira "Mensagem apagada".
+  const alterarChatMsg = (reqId, msgId, mudar) => {
+    const req = requests.find(x => x.id === reqId);
+    if (!req) return false;
+    const now = Date.now();
+    const updated = { ...req, chat: (req.chat || []).map(m => (m.id === msgId ? { ...mudar(m, now), alteradoTs: now } : m)) };
+    setRequests(rs => rs.map(x => (x.id === reqId ? updated : x)));
+    db.saveRequest(updated);
+    return true;
+  };
+  const editChatMsg = (reqId, msgId, texto) => alterarChatMsg(reqId, msgId, (m, now) => ({ ...m, texto, editadaTs: now }));
+  const deleteChatMsg = (reqId, msgId) => alterarChatMsg(reqId, msgId, (m, now) => ({ ...m, texto: "", arquivos: [], excluida: true, excluidaTs: now }));
 
-  if (view === "detalhe") screen = <Detalhe r={selected} back={() => nav("lista-cad")} interno openModal={setModal} currentUser={currentUser} onSendMsg={sendChatMsg} onReopenRequest={reopenRequest} acervo={acervo} onLiberarDoc={liberarDoc} onCancelarEnvio={cancelarEnvio} toast={toast} />;
+  if (view === "detalhe") screen = <Detalhe r={selected} back={() => nav("lista-cad")} interno openModal={setModal} currentUser={currentUser} onSendMsg={sendChatMsg} onReopenRequest={reopenRequest} onEditMsg={editChatMsg} onDeleteMsg={deleteChatMsg} acervo={acervo} onLiberarDoc={liberarDoc} onCancelarEnvio={cancelarEnvio} toast={toast} />;
   else if (view === "cliente") screen = <ClienteDetalhe nome={selId} requests={requests} users={users} nav={nav} />;
   else {
     screen = { dash: <IntDash nav={nav} requests={requests} />, "lista-cad": <IntLista nav={nav} requests={requests} tipo="Cadastro" titulo="Solicitações de Cadastro" onMoverStatus={moverStatus} />, clientes: <Clientes requests={requests} users={users} nav={nav} />, acervo: (["ADMIN", "GESTOR"].includes(currentUser?.role) ? <AcervoDocs acervo={acervo} onAdd={addAcervoDoc} onUpdate={updateAcervoDoc} onRemove={removeAcervoDoc} toast={toast} /> : <IntDash nav={nav} requests={requests} />), usuarios: <Usuarios toast={toast} users={users} currentUser={currentUser} onAddUser={addUser} onUpdateUser={updateUser} onDeleteUser={removeUser} />, relatorios: <Relatorios toast={toast} requests={requests} />, config: <Config toast={toast} templates={templates} onSaveTemplates={saveTemplates} />, conta: <MinhaConta toast={toast} user={currentUser} /> }[view];

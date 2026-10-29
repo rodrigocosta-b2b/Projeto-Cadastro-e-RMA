@@ -30,13 +30,15 @@
  *          documentos liberados e o `acesso` ao chamado. Limite: 40 consultas / 15 min por IP (429).
  *   GET    /api/public/chamado/:acesso           → { id, status, datas, chat, entregues } — o `acesso` vem na
  *          consulta (qualquer um dos três dados); nunca traz linha do tempo interna nem dados cadastrais
- *   POST   /api/public/chamado/:acesso/mensagens {texto, arquivos[]} → mensagem do fornecedor no chat
+ *   POST   /api/public/chamado/:acesso/mensagens {texto, arquivos[]} → mensagem do solicitante no chat
  *          (reabre chamado Concluído/Negado e avisa a equipe)
+ *   PATCH/DELETE /api/public/chamado/:acesso/mensagens/:msgId → solicitante edita/exclui mensagem dele
+ *          (excluir = marca `excluida` e mostra "Mensagem apagada"; não remove a linha)
  *   GET    /api/public/chamado/:acesso/arquivo/:fileId → anexo de uma mensagem daquele chat
  *   GET    /api/public/entrega/:token/:docId    → arquivo de um documento do acervo com
  *          "envio automático" ou enviado pela equipe nessa solicitação (token só vai para quem enviou).
  *          Documentos sem envio automático só saem por aqui depois que a equipe clica em
- *          "Enviar ao fornecedor" no chamado (docsEnviados[].liberado).
+ *          "Enviar ao solicitante" no chamado (docsEnviados[].liberado).
  *   POST   /api/login        {email,password}   → { user, token } + cookie | 401 | 403 | 429
  *   POST   /api/logout
  *   GET    /api/me                              → { user } | 401
@@ -690,9 +692,15 @@ async function requestPorAcesso(env, token) {
 // são mantidos; tokens de acesso/entrega nunca se perdem.
 function mesclarChamado(atual, recebido) {
   if (!atual) return recebido;
+  // Para a mesma chave, fica a versão alterada por último (`alteradoTs` = edição/exclusão):
+  // assim a tela da equipe não desfaz a edição ou exclusão que o solicitante fez.
   const unir = (a, b, chave) => {
     const vistos = new Map();
-    for (const x of [...(a || []), ...(b || [])]) if (x) vistos.set(chave(x), x);
+    for (const x of [...(a || []), ...(b || [])]) {
+      if (!x) continue;
+      const k = chave(x), atualX = vistos.get(k);
+      if (!atualX || (x.alteradoTs || 0) >= (atualX.alteradoTs || 0)) vistos.set(k, x);
+    }
     return [...vistos.values()].sort((x, y) => (x.ts || 0) - (y.ts || 0));
   };
   return {
@@ -710,12 +718,22 @@ async function garantirAcesso(env, req) {
   return req.acessoToken;
 }
 // Visão do fornecedor: anexos do chat apontam para a rota pública do próprio chamado.
+// "karliene.oliveira@gocase.com" → "Karliene Oliveira" (igual a nomeDoEmail no cliente).
+function nomeDoEmail(email) {
+  const local = String(email || "").split("@")[0].split("+")[0];
+  return local.split(/[._\-+\d]+/).filter(Boolean)
+    .map((p, i) => (i > 0 && ["da", "de", "do", "das", "dos", "e"].includes(p.toLowerCase()) ? p.toLowerCase() : p.charAt(0).toUpperCase() + p.slice(1).toLowerCase())).join(" ");
+}
+// Nome de quem pede o cadastro, mostrado no chat: vem do e-mail do solicitante.
+const nomeSolicitante = (req) => nomeDoEmail(req.emailSolicitante) || (req.dados && req.dados.nomeContato) || req.parceiro || "Solicitante";
 function chatPublico(req) {
   const token = req.acessoToken;
   return (req.chat || []).map((m) => ({
-    id: m.id, ts: m.ts, role: m.role === "cliente" ? "cliente" : "equipe", autor: m.autor || (m.role === "cliente" ? "Fornecedor" : "Equipe gocase"),
-    texto: m.texto || "",
-    arquivos: (m.arquivos || []).map((f) => {
+    id: m.id, ts: m.ts, role: m.role === "cliente" ? "cliente" : "equipe",
+    autor: m.role === "cliente" ? nomeSolicitante(req) : (m.autor || "Equipe gocase"),
+    excluida: !!m.excluida, editada: !!m.editadaTs && !m.excluida,
+    texto: m.excluida ? "" : (m.texto || ""),
+    arquivos: (m.excluida ? [] : (m.arquivos || [])).map((f) => {
       const fid = fileIdFromUrl(f.url);
       return fid ? { name: f.name || "arquivo", type: f.type || "", url: `/api/public/chamado/${token}/arquivo/${fid}` } : null;
     }).filter(Boolean),
@@ -739,7 +757,7 @@ async function mensagemDoFornecedor(env, token, body) {
   if (!texto && !arquivos.length) return json({ error: "empty" }, 400);
   if ((req.chat || []).length >= CHAT_MAX_MSGS) return json({ error: "chat_full" }, 429);
   const now = Date.now();
-  const autor = (req.dados && req.dados.nomeContato) || req.parceiro || "Fornecedor";
+  const autor = nomeSolicitante(req);
   const msg = { id: `msg-${now}-${randomToken(3)}`, ts: now, role: "cliente", autor, texto, arquivos, viaPortal: true };
   const reabrir = ["CONCLUIDA", "NEGADA"].includes(req.status);
   const novo = {
@@ -748,23 +766,43 @@ async function mensagemDoFornecedor(env, token, body) {
     ultimaAtualiz: fmtBRFull(now), ultimaAtualizTs: now,
     ...(reabrir ? {
       status: "EM_ANALISE",
-      movimentos: [...(req.movimentos || []), { status: "EM_ANALISE", actor: "cliente", who: autor, ts: now, text: "Chamado reaberto automaticamente por nova mensagem do fornecedor." }],
+      movimentos: [...(req.movimentos || []), { status: "EM_ANALISE", actor: "cliente", who: autor, ts: now, text: "Chamado reaberto automaticamente por nova mensagem do solicitante." }],
     } : {}),
   };
   await gravarRequest(env, novo);
   await saveNotification(env, {
     id: `n-${now}-${randomToken(3)}`, ts: now, read: false, audience: "interno", requestId: req.id, color: reabrir ? "#FFC247" : "#00B8D9",
     message: reabrir
-      ? `Chamado ${req.id} REABERTO por nova mensagem do fornecedor: "${texto.slice(0, 60)}${texto.length > 60 ? "…" : ""}"`
-      : `Nova mensagem do fornecedor no chamado ${req.id}: "${texto.slice(0, 60)}${texto.length > 60 ? "…" : ""}"`,
+      ? `Chamado ${req.id} REABERTO por nova mensagem do solicitante (${autor}): "${texto.slice(0, 60)}${texto.length > 60 ? "…" : ""}"`
+      : `Nova mensagem de ${autor} (solicitante) no chamado ${req.id}: "${texto.slice(0, 60)}${texto.length > 60 ? "…" : ""}"`,
   });
   return json({ ok: true, reaberto: reabrir, status: novo.status, mensagem: chatPublico({ ...novo, chat: [msg] })[0] }, 201);
 }
+// Solicitante edita (PATCH {texto}) ou exclui (DELETE) uma mensagem DELE no chat.
+// Excluir não apaga a linha: marca `excluida`, limpa texto e anexos e mostra "Mensagem apagada".
+async function alterarMensagemDoSolicitante(env, token, msgId, metodo, body) {
+  const req = await requestPorAcesso(env, token);
+  if (!req) return json({ error: "not_found" }, 404);
+  const msg = (req.chat || []).find((m) => m.id === msgId);
+  if (!msg || msg.role !== "cliente" || msg.excluida) return json({ error: "not_found" }, 404);
+  const now = Date.now();
+  let novaMsg;
+  if (metodo === "PATCH") {
+    const texto = str(body && body.texto, 4000);
+    if (!texto && !(msg.arquivos || []).length) return json({ error: "empty" }, 400);
+    novaMsg = { ...msg, texto, editadaTs: now, alteradoTs: now };
+  } else {
+    novaMsg = { ...msg, texto: "", arquivos: [], excluida: true, excluidaTs: now, alteradoTs: now };
+  }
+  await gravarRequest(env, { ...req, chat: req.chat.map((m) => (m.id === msgId ? novaMsg : m)) });
+  return json({ ok: true });
+}
+
 // Arquivo de uma mensagem do chat, só para quem tem o acesso daquele chamado.
 async function arquivoDoChat(env, token, fileId) {
   const req = await requestPorAcesso(env, token);
   if (!req) return json({ error: "not_found" }, 404);
-  const doChat = (req.chat || []).some((m) => (m.arquivos || []).some((f) => fileIdFromUrl(f.url) === fileId));
+  const doChat = (req.chat || []).some((m) => !m.excluida && (m.arquivos || []).some((f) => fileIdFromUrl(f.url) === fileId));
   if (!doChat) return json({ error: "not_found" }, 404);
   const res = await fileResponse(env, fileId, false);
   res.headers.set("cache-control", "no-store");
@@ -850,7 +888,9 @@ export default {
       if (path.startsWith("/api/public/chamado/")) {
         const [token = "", sub = "", fileId = ""] = path.slice("/api/public/chamado/".length).split("/").map((x) => decodeURIComponent(x));
         if (!sub && method === "GET") return await chamadoPublico(env, token);
-        if (sub === "mensagens" && method === "POST") return await mensagemDoFornecedor(env, token, (await request.json().catch(() => null)) || {});
+        if (sub === "mensagens" && !fileId && method === "POST") return await mensagemDoFornecedor(env, token, (await request.json().catch(() => null)) || {});
+        if (sub === "mensagens" && fileId && (method === "PATCH" || method === "DELETE"))
+          return await alterarMensagemDoSolicitante(env, token, fileId, method, (await request.json().catch(() => null)) || {});
         if (sub === "arquivo" && fileId && method === "GET") return await arquivoDoChat(env, token, fileId);
         return json({ error: "not_found" }, 404);
       }
