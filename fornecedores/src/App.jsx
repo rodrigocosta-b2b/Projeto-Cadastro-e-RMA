@@ -1080,7 +1080,7 @@ const MENU = {
   interno: [
     { id: "dash", label: "Dashboard", icon: LayoutDashboard },
     { id: "lista-cad", label: "Cadastros", icon: FileCheck },
-    { id: "clientes", label: "Fornecedores", icon: Building2 },
+    { id: "clientes", label: "Clientes", icon: Building2 },
     { id: "acervo", label: "Acervo de documentos", icon: BookOpen, roles: ["ADMIN", "GESTOR"] },
     { id: "usuarios", label: "Usuários", icon: Users },
     { id: "relatorios", label: "Relatórios", icon: BarChart3 },
@@ -2557,26 +2557,32 @@ function KanbanCard({ r, nav, arrastavel }) {
 function KanbanBoard({ rows, nav, onMover }) {
   const cols = Object.entries(STATUS);
   const [alvo, setAlvo] = useState(null); // coluna sob o card arrastado
+  // A COLUNA INTEIRA (título + lista + espaço vazio até o fim do quadro) recebe o card —
+  // antes só a área dos cards recebia, e soltar abaixo do último card não fazia nada.
+  const alvoProps = (key) => (onMover ? {
+    onDragOver: (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; if (alvo !== key) setAlvo(key); },
+    onDragLeave: (e) => { if (!e.currentTarget.contains(e.relatedTarget)) setAlvo(a => (a === key ? null : a)); },
+    onDrop: (e) => { e.preventDefault(); setAlvo(null); const id = e.dataTransfer.getData("text/plain"); if (id) onMover(id, key); },
+  } : {});
   return (
-    <div className="flex gap-4 overflow-x-auto pb-2">
+    <div className="flex gap-4 overflow-x-auto pb-2" onDragEnd={() => setAlvo(null)}>
       {cols.map(([key, s]) => {
         const items = rows.filter(r => r.status === key);
         const destacado = alvo === key;
         return (
-          <div key={key} className="shrink-0 w-72">
-            <div className="flex items-center gap-2 mb-3 px-1">
+          <div key={key} className="shrink-0 w-72 flex flex-col rounded-2xl transition"
+            style={{ height: "max(360px, calc(100vh - 290px))", outline: destacado ? `2px dashed ${s.color}` : "none", outlineOffset: 2 }}
+            {...alvoProps(key)}>
+            <div className="flex items-center gap-2 mb-3 px-1 shrink-0">
               <span className="w-2 h-2 rounded-full shrink-0" style={{ background: s.color }} />
               <span className="text-sm font-bold truncate" style={{ color: C.text }}>{s.label}</span>
               <span className="ml-auto text-xs font-bold rounded-full px-2 py-0.5 shrink-0" style={{ background: C.bg, color: C.muted }}>{items.length}</span>
             </div>
-            <div className="rounded-2xl p-2 min-h-[100px] max-h-[calc(100vh-300px)] overflow-y-auto transition"
-              style={{ background: destacado ? s.color + "22" : C.bg, outline: destacado ? `2px dashed ${s.color}` : "none" }}
-              onDragOver={onMover ? (e => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; if (alvo !== key) setAlvo(key); }) : undefined}
-              onDragLeave={onMover ? (e => { if (!e.currentTarget.contains(e.relatedTarget)) setAlvo(a => (a === key ? null : a)); }) : undefined}
-              onDrop={onMover ? (e => { e.preventDefault(); setAlvo(null); const id = e.dataTransfer.getData("text/plain"); if (id) onMover(id, key); }) : undefined}>
-              {items.length === 0 ? (
-                <div className="text-xs text-center py-6" style={{ color: C.muted }}>{destacado ? "Solte aqui" : "Sem solicitações"}</div>
-              ) : items.map(r => <KanbanCard key={r.id} r={r} nav={nav} arrastavel={!!onMover} />)}
+            <div className="flex-1 min-h-0 rounded-2xl p-2 overflow-y-auto transition" style={{ background: destacado ? s.color + "22" : C.bg }}>
+              {items.length === 0
+                ? <div className="text-xs text-center py-6" style={{ color: C.muted }}>{destacado ? "Solte aqui" : "Sem solicitações"}</div>
+                : items.map(r => <KanbanCard key={r.id} r={r} nav={nav} arrastavel={!!onMover} />)}
+              {items.length > 0 && destacado && <div className="text-xs text-center py-3 rounded-xl border border-dashed" style={{ color: s.color, borderColor: s.color }}>Solte aqui</div>}
             </div>
           </div>
         );
@@ -2650,11 +2656,14 @@ function Clientes({ requests, users, nav }) {
   (users || []).filter(u => u.role === "CLIENTE").forEach(u => {
     map[u.name] = { nome: u.name, cnpj: u.cnpj || "—", contato: u.contato || "—", uf: "—" };
   });
+  // Contato do cliente: nome do contato + e-mail do solicitante informados no formulário.
+  const contatoDe = (r) => [r.dados?.nomeContato, r.emailSolicitante].filter(Boolean).join(" · ") || "—";
   (requests || []).forEach(r => {
-    if (!map[r.parceiro]) map[r.parceiro] = { nome: r.parceiro, cnpj: r.cnpj || "—", contato: "—", uf: r.uf || "—" };
+    if (!map[r.parceiro]) map[r.parceiro] = { nome: r.parceiro, cnpj: r.cnpj || "—", contato: contatoDe(r), uf: r.uf || "—" };
     else {
       if (map[r.parceiro].cnpj === "—" && r.cnpj) map[r.parceiro].cnpj = r.cnpj;
       if (map[r.parceiro].uf === "—" && r.uf) map[r.parceiro].uf = r.uf;
+      if (map[r.parceiro].contato === "—") map[r.parceiro].contato = contatoDe(r);
     }
   });
   const list = Object.values(map).map((c, i) => ({ ...c, id: i, count: requests.filter(r => r.parceiro === c.nome).length }));
@@ -2666,13 +2675,13 @@ function Clientes({ requests, users, nav }) {
   const { paged, more } = usePagedList(filtered, qn);
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-1" style={{ color: C.text }}>Fornecedores</h1>
-      <p className="text-sm mb-4" style={{ color: C.muted }}>Clique em uma empresa para ver todas as solicitações feitas por ela.</p>
+      <h1 className="text-2xl font-bold mb-1" style={{ color: C.text }}>Clientes</h1>
+      <p className="text-sm mb-4" style={{ color: C.muted }}>Empresas que pediram o cadastro da BB Indústria ou da Go Comércio como fornecedora. Clique em uma para ver todas as solicitações dela.</p>
       {list.length > 0 && (
         <Card className="p-3 mb-4">
           <div className="relative">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.muted }} />
-            <input value={q} onChange={e => setQ(e.target.value)} placeholder="Buscar por fornecedor, CNPJ, UF ou contato…"
+            <input value={q} onChange={e => setQ(e.target.value)} placeholder="Buscar por cliente, CNPJ, UF ou contato…"
               className="w-full rounded-xl border py-2 pl-9 pr-3 text-sm outline-none bg-white" style={{ borderColor: C.line }} />
           </div>
         </Card>
@@ -2683,7 +2692,7 @@ function Clientes({ requests, users, nav }) {
             {list.length === 0 ? "Nenhuma empresa cadastrada ou com solicitações ainda." : `Nenhum resultado para "${q.trim()}".`}
           </div>
         ) : (
-          <DataTable rows={paged} cols={["Fornecedor", "CNPJ", "UF", "Contato", "Solicitações", ""]} onRow={c => nav("cliente", c.nome)} render={c => (
+          <DataTable rows={paged} cols={["Cliente", "CNPJ", "UF", "Contato", "Solicitações", ""]} onRow={c => nav("cliente", c.nome)} render={c => (
             <>
               <td className="px-4 py-3 font-semibold" style={{ color: C.text }}>{c.nome}</td>
               <td className="px-4 py-3" style={{ color: C.muted }}>{c.cnpj}</td>
