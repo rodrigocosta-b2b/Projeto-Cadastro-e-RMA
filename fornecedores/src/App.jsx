@@ -1382,8 +1382,11 @@ function buildTimeline(r) {
     return `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}/${d.getFullYear()} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
   };
   const ev = [{ status: "NOVA", actor: "cliente", who: r.parceiro, ts: aberturaTs, when: fmtTs(aberturaTs), text: "Solicitação aberta no portal." }];
-  if (r.resp && r.resp !== "—" && r.resp !== "IA") {
-    const atribTs = r.atribTs || (aberturaTs + 2 * 3600000);
+  // Hora real da atribuição (atribTs, gravado na 1ª movimentação da equipe); chamados antigos
+  // usam a 1ª movimentação registrada. Sem nenhuma das duas, não inventa horário.
+  const primeiroMov = Math.min(...(r.movimentos || []).map(mv => mv.ts).filter(Boolean));
+  const atribTs = r.atribTs || (Number.isFinite(primeiroMov) ? primeiroMov : null);
+  if (r.resp && r.resp !== "—" && r.resp !== "IA" && atribTs) {
     ev.push({ status: "EM_ANALISE", actor: "user", who: r.resp, ts: atribTs, when: fmtTs(atribTs), text: `Solicitação atribuída a ${r.resp}. Analisando informações e anexos.` });
   }
   if (Array.isArray(r.movimentos)) {
@@ -3582,6 +3585,7 @@ export default function App() {
         ultimaAtualizTs: now,
         finalizadoTs: isFinal ? now : undefined,
         resp: req.resp === "—" ? (currentUser?.name || "Equipe gocase") : req.resp,
+        ...(req.resp === "—" && !req.atribTs ? { atribTs: now } : {}),
         movimentos: [...(req.movimentos || []), mover],
       };
       setRequests(rs => rs.map(r => r.id === reqId ? updated : r));
