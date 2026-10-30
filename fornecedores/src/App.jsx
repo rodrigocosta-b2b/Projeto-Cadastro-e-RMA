@@ -1394,9 +1394,7 @@ function buildTimeline(r) {
     if (r.status === "NEGADA" && r.resp !== "IA") { const ts = r.negadoTs || r.ultimaAtualizTs || parseBR(r.prazo) || (aberturaTs + 4 * 3600000); ev.push({ status: "NEGADA", actor: "user", who: r.resp, ts, when: fmtTs(ts), text: r.msgNegativa || "Solicitação negada." }); }
     if (r.status === "CONCLUIDA") { const ts = r.concluidoTs || r.finalizadoTs || (aberturaTs + 5 * 3600000); ev.push({ status: "CONCLUIDA", actor: "user", who: r.resp, ts, when: fmtTs(ts), text: "Processo concluído e solicitante comunicado." }); }
   }
-  if (Array.isArray(r.chat) && r.chat.length > 0) {
-    r.chat.forEach(msg => ev.push({ status: r.status, actor: msg.role === "cliente" ? "cliente" : "user", who: msg.role === "cliente" ? nomeSolicitante(r) : msg.autor, ts: msg.ts, when: fmtTs(msg.ts), text: msg.excluida ? "💬 Mensagem apagada" : `💬 ${msg.texto}${msg.editadaTs ? " (editada)" : ""}`, isChat: true }));
-  }
+  // Só movimentações de status e envios de documentos: as mensagens ficam no chat.
   return ev.sort((a, b) => (a.ts || 0) - (b.ts || 0));
 }
 
@@ -1811,13 +1809,13 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
           <div className="relative pl-6">
             <div className="absolute left-2 top-1 bottom-1 w-px" style={{ background: C.line }} />
             {tl.map((t, i) => {
-              const dot = t.isChat ? C.cyan : t.actor === "ia" ? C.violet : t.actor === "cliente" ? C.cyan : C.coral;
+              const dot = t.actor === "ia" ? C.violet : t.actor === "cliente" ? C.cyan : C.coral;
               const stDef = STATUS[t.status] || STATUS.NOVA;
               return (
                 <div key={i} className="relative mb-5">
                   <span className="absolute -left-[18px] top-1 w-3 h-3 rounded-full border-2 border-white" style={{ background: dot }} />
                   <div className="flex items-center gap-2 flex-wrap">
-                    {t.isChat ? <span className="inline-flex items-center gap-1 text-xs font-semibold" style={{ color: C.cyan }}><MessageSquare size={12} />Chat</span> : <Pill label={stDef.label} color={stDef.color} />}
+                    <Pill label={stDef.label} color={stDef.color} />
                     {t.actor === "ia" && <Sparkles size={13} style={{ color: C.violet }} />}
                   </div>
                   <div className="text-xs mt-1" style={{ color: C.muted }}>{t.who} · {t.when}</div>
