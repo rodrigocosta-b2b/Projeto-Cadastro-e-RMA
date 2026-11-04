@@ -117,6 +117,7 @@ function ensureSchema(env) {
       for (const sql of ddl) await env.DB.exec(sql, []);
       await secureAccounts(env);
       await normalizarAcervo(env);
+      await encurtarProtocolos(env);
     })().catch((e) => {
       schemaReady = null;
       throw e;
@@ -441,6 +442,26 @@ function fileRefResponse(id, body) {
 }
 
 /* --------------------------- solicitação pública ---------------------------- */
+/* Protocolo: CAD-AAAA-NNN (3 dígitos no mínimo; cresce sozinho depois de 999). O formato
+ * antigo, com 6 dígitos (CAD-2026-000008), vira o curto (CAD-2026-008): no banco, uma vez
+ * (encurtarProtocolos), e em toda entrada — consulta pública e gravação da equipe. */
+const protocoloCurto = (id) => String(id || "").replace(/^(CAD-\d{4}-)0*(\d{3,})$/i, "$1$2");
+async function encurtarProtocolos(env) {
+  const r = await env.DB.query("SELECT id, payload FROM requests WHERE id GLOB 'CAD-[0-9][0-9][0-9][0-9]-0[0-9][0-9][0-9][0-9]*'", []);
+  for (const row of r.rows || []) {
+    const novoId = protocoloCurto(row.id);
+    if (novoId === row.id) continue;
+    const ja = await env.DB.query("SELECT 1 AS x FROM requests WHERE id = ?", [novoId]);
+    if (ja.rows && ja.rows.length) continue;
+    const req = parse(row.payload) || {};
+    await env.DB.exec("UPDATE requests SET id = ?, payload = ? WHERE id = ?", [novoId, JSON.stringify({ ...req, id: novoId }), row.id]);
+    // Notificações citam o protocolo no texto e em requestId.
+    const n = await env.DB.query("SELECT id, payload FROM notifications WHERE payload LIKE ?", [`%${row.id}%`]);
+    for (const nr of n.rows || []) {
+      await env.DB.exec("UPDATE notifications SET payload = ? WHERE id = ?", [String(nr.payload).split(row.id).join(novoId), nr.id]);
+    }
+  }
+}
 async function nextCadastroId(env, year) {
   const r = await env.DB.query("SELECT id FROM requests WHERE id LIKE ?", [`CAD-${year}-%`]);
   const nums = (r.rows || []).map((x) => parseInt(String(x.id).split("-")[2], 10)).filter((n) => !isNaN(n));
@@ -573,7 +594,7 @@ async function createCadastro(env, body) {
   const now = Date.now();
   const year = fmtBR(now).slice(-4);
   for (let tentativa = 0; tentativa < 5; tentativa++) {
-    const id = `CAD-${year}-${String((await nextCadastroId(env, year)) + tentativa).padStart(6, "0")}`;
+    const id = `CAD-${year}-${String((await nextCadastroId(env, year)) + tentativa).padStart(3, "0")}`;
     const req = {
       id, tipo: "Cadastro", status: "NOVA", resp: "—", sla: "DENTRO", origem: "publico",
       abertura: fmtBR(now), aberturaTs: now, prazo: fmtBR(now + 7 * 86400000),
@@ -619,7 +640,7 @@ async function createCadastro(env, body) {
  *  limite de consultas por IP (consultaLimitada).
  * Nunca devolve dados cadastrais, mensagens ou anexos do fornecedor. */
 async function publicStatus(env, id, cnpj, email) {
-  const protocolo = str(id, 40).toUpperCase();
+  const protocolo = protocoloCurto(str(id, 40).toUpperCase());
   const digits = onlyDigits(cnpj);
   const mail = lower(str(email, 200));
   if (!protocolo && !digits && !mail) return json({ error: "missing" }, 400);
@@ -996,9 +1017,11 @@ export default {
       }
 
       if (path.startsWith("/api/requests/") && method === "PUT") {
-        const id = decodeURIComponent(path.slice("/api/requests/".length));
-        const recebido = (await request.json().catch(() => null)) || null;
-        if (!recebido || !recebido.id || recebido.id !== id) return json({ error: "invalid_body" }, 400);
+        // Tela aberta antes da troca de protocolo ainda manda o formato longo: grava no curto.
+        const id = protocoloCurto(decodeURIComponent(path.slice("/api/requests/".length)));
+        const corpo = (await request.json().catch(() => null)) || null;
+        if (!corpo || !corpo.id || protocoloCurto(corpo.id) !== id) return json({ error: "invalid_body" }, 400);
+        const recebido = { ...corpo, id };
         // A tela da equipe grava o chamado inteiro: junta com o que está no banco para não
         // apagar mensagens que o fornecedor mandou enquanto a tela estava aberta.
         const req = mesclarChamado(await getRequest(env, id), recebido);
