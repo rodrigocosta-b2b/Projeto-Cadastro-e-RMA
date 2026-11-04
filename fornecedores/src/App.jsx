@@ -110,11 +110,11 @@ const StatCard = ({ icon: Icon, label, value, color, onClick }) => (
       <div className="text-xs" style={{ color: C.muted }}>{label}</div></div>
   </Card>
 );
-const Btn = ({ children, onClick, variant = "solid", color = C.coral, icon: Icon }) => {
+const Btn = ({ children, onClick, variant = "solid", color = C.coral, icon: Icon, disabled = false }) => {
   const base = "inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition";
   const style = variant === "solid" ? { background: color, color: "white" }
     : variant === "outline" ? { border: `1px solid ${color}`, color } : { color };
-  return <button onClick={onClick} className={base} style={style}>{Icon && <Icon size={16} />}{children}</button>;
+  return <button onClick={onClick} disabled={disabled} className={base} style={{ ...style, ...(disabled ? { opacity: 0.5, cursor: "not-allowed" } : {}) }}>{Icon && <Icon size={16} />}{children}</button>;
 };
 const Field = ({ label, value, onChange, type = "text", full, options }) => (
   <div className={full ? "sm:col-span-2" : ""}>
@@ -222,6 +222,9 @@ const REQ_KEY = "gocase_forn_requests_v1";
 const NOTIF_KEY = "gocase_forn_notifs_v1";
 const TPL_KEY = "gocase_forn_templates_v1";
 const ACERVO_KEY = "gocase_forn_acervo_v1";
+const CONFIG_KEY = "gocase_forn_config_v1";
+// Configurações gerais (Configurações → Regras de negócio). slaDias: prazo das NOVAS solicitações.
+const CONFIG_PADRAO = { slaDias: 7 };
 // Acervo de documentos que o fornecedor pode pedir no cadastro. Gerenciado por
 // admins/gestores na aba "Acervo de documentos". Cada item tem `documento` (nome sem a
 // empresa), `empresa` ("bb" | "go" | "" = vale para as duas) e o nome exibido
@@ -369,6 +372,7 @@ const db = {
       notifications: _ls.get(NOTIF_KEY, null),
       templates: _ls.get(TPL_KEY, null),
       acervo: _ls.get(ACERVO_KEY, null),
+      config: _ls.get(CONFIG_KEY, null),
     };
   },
   async login(email, password) {
@@ -466,6 +470,14 @@ const db = {
     }
     _ls.set(TPL_KEY, t);
   },
+  // Só ADMIN/GESTOR (o servidor recusa os demais). Devolve true se gravou.
+  async saveConfig(c) {
+    if ((await dbMode()) === "remote") {
+      try { return (await apiJSON("PUT", "/api/config", c)).ok; } catch (e) { return false; }
+    }
+    _ls.set(CONFIG_KEY, c);
+    return true;
+  },
   async saveAcervoDoc(doc) {
     if ((await dbMode()) === "remote") {
       try { await apiJSON("PUT", `/api/acervo/${encodeURIComponent(doc.id)}`, doc); } catch (e) { }
@@ -543,9 +555,10 @@ const db = {
     const d = payload.dados || {};
     const acervoAll = _ls.get(ACERVO_KEY, null) || DEFAULT_ACERVO;
     const docs = acervoAll.filter(doc => (payload.docsSolicitados || []).includes(doc.id));
+    const slaDias = (_ls.get(CONFIG_KEY, null) || CONFIG_PADRAO).slaDias || 7;
     const req = {
       id, tipo: "Cadastro", status: "NOVA", resp: "—", sla: "DENTRO", origem: "publico",
-      abertura: fmtDataBR(now), aberturaTs: now.getTime(), prazo: fmtDataBR(new Date(now.getTime() + 7 * 86400000)),
+      abertura: fmtDataBR(now), aberturaTs: now.getTime(), prazo: fmtDataBR(new Date(now.getTime() + slaDias * 86400000)), slaDias,
       ultimaAtualiz: now.toLocaleString("pt-BR"), ultimaAtualizTs: now.getTime(),
       parceiro: d.nomeFantasia || d.razaoSocial || `CNPJ ${payload.cnpj}`, cnpj: payload.cnpj, uf: d.estado || "—",
       email: payload.emailSolicitante || d.email || "", emailSolicitante: (payload.emailSolicitante || "").toLowerCase(), ie: d.inscricaoEstadual || "", ownerEmail: (payload.emailSolicitante || "").toLowerCase(), dados: d,
@@ -3190,18 +3203,44 @@ function Relatorios({ toast, requests }) {
   );
 }
 
-function Config({ toast, templates, onSaveTemplates }) {
+function Config({ toast, templates, onSaveTemplates, config, onSaveConfig, podeEditarRegras }) {
   const labels = { EM_ANALISE: "Em análise", AGUARDANDO: "Aguardando informações", APROVADA: "Aprovada", NEGADA: "Negada", CONCLUIDA: "Concluída" };
   const [tpl, setTpl] = useState({ ...DEFAULT_TEMPLATES, ...(templates || {}) });
   const setOne = (k) => (e) => setTpl(s => ({ ...s, [k]: e.target.value }));
+  const [slaDias, setSlaDias] = useState(String(config?.slaDias || 7));
+  useEffect(() => { setSlaDias(String(config?.slaDias || 7)); }, [config?.slaDias]);
+  const [salvando, setSalvando] = useState(false);
+  const slaNum = Number(slaDias);
+  const slaOk = Number.isInteger(slaNum) && slaNum >= 1 && slaNum <= 90;
+  const alterouSla = slaOk && slaNum !== config?.slaDias;
+  // Grava o SLA padrão (vale para as solicitações abertas a partir de agora).
+  const salvarRegras = async () => {
+    if (!podeEditarRegras || !alterouSla) return true;
+    setSalvando(true);
+    const ok = await onSaveConfig({ ...config, slaDias: slaNum });
+    setSalvando(false);
+    if (!ok) toast("Não foi possível salvar o SLA padrão. Tente novamente.");
+    return ok;
+  };
   return (
     <div className="max-w-2xl">
       <h1 className="text-2xl font-bold mb-4" style={{ color: C.text }}>Configurações</h1>
       <Card className="p-5 mb-4">
         <h2 className="font-bold mb-3" style={{ color: C.text }}>Regras de negócio</h2>
-        <div className="grid sm:grid-cols-2 gap-4 text-sm">
-          <div><label className="text-xs font-semibold" style={{ color: C.muted }}>SLA padrão (dias)</label><input defaultValue="7" className="mt-1 w-full rounded-xl border px-3 py-2 bg-white" style={{ borderColor: C.line }} /></div>
+        <div className="grid sm:grid-cols-2 gap-4 text-sm items-end">
+          <div>
+            <label className="text-xs font-semibold" style={{ color: C.muted }}>SLA padrão (dias)</label>
+            <input type="number" min={1} max={90} step={1} inputMode="numeric" value={slaDias} disabled={!podeEditarRegras}
+              onChange={e => setSlaDias(e.target.value)}
+              className="mt-1 w-full rounded-xl border px-3 py-2 bg-white" style={{ borderColor: slaOk ? C.line : C.danger, opacity: podeEditarRegras ? 1 : 0.7 }} />
+          </div>
+          {podeEditarRegras && <div><Btn icon={salvando ? Loader2 : Save} onClick={async () => { if (alterouSla && await salvarRegras()) toast(`SLA padrão alterado para ${slaNum} dia${slaNum === 1 ? "" : "s"}.`); }} disabled={!alterouSla || salvando}>Salvar SLA</Btn></div>}
         </div>
+        <p className="text-xs mt-2" style={{ color: slaOk ? C.muted : C.danger }}>
+          {!slaOk ? "Informe um número inteiro de 1 a 90 dias."
+            : `Prazo de análise das novas solicitações (abertura + ${slaNum} dia${slaNum === 1 ? "" : "s"}, até o fim do dia). As que já foram abertas mantêm o prazo que receberam.`}
+          {!podeEditarRegras && " Só administradores e gestores podem alterar."}
+        </p>
       </Card>
 
       <Card className="p-5 mb-4">
@@ -3230,7 +3269,7 @@ function Config({ toast, templates, onSaveTemplates }) {
             {n}<input type="checkbox" defaultChecked className="w-4 h-4" style={{ accentColor: C.coral }} /></label>
         ))}
       </Card>
-      <Btn onClick={() => toast("Configurações salvas.")}>Salvar configurações</Btn>
+      <Btn onClick={async () => { if (!slaOk) { toast("Corrija o SLA padrão: um número inteiro de 1 a 90 dias."); return; } if (await salvarRegras()) toast("Configurações salvas."); }}>Salvar configurações</Btn>
     </div>
   );
 }
@@ -3507,6 +3546,7 @@ export default function App() {
   const [requests, setRequests] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [templates, setTemplates] = useState(DEFAULT_TEMPLATES);
+  const [config, setConfig] = useState(CONFIG_PADRAO);
   const [acervo, setAcervo] = useState(DEFAULT_ACERVO);
   const [publicAcervo, setPublicAcervo] = useState([]);
   const [toastMsg, setToastMsg] = useState(null);
@@ -3537,6 +3577,7 @@ export default function App() {
     if (Array.isArray(data.notifications)) setNotifications(data.notifications);
     if (data.templates && typeof data.templates === "object") setTemplates({ ...DEFAULT_TEMPLATES, ...data.templates });
     else db.saveTemplates(DEFAULT_TEMPLATES);
+    if (data.config && typeof data.config === "object") setConfig({ ...CONFIG_PADRAO, ...data.config });
     if (Array.isArray(data.acervo) && data.acervo.length) setAcervo(data.acervo);
     else { await Promise.all(DEFAULT_ACERVO.map(d => db.saveAcervoDoc(d))); setAcervo(DEFAULT_ACERVO); }
     return true;
@@ -3571,6 +3612,7 @@ export default function App() {
 
   // Persistência por entidade — cada registro é salvo individualmente no env.DB.
   const saveTemplates = (next) => { setTemplates(next); db.saveTemplates(next); };
+  const saveConfig = async (next) => { const ok = await db.saveConfig(next); if (ok) setConfig(next); return ok; };
   const addAcervoDoc = (doc) => { setAcervo(a => [...a, doc]); db.saveAcervoDoc(doc); };
   const updateAcervoDoc = (doc) => { setAcervo(a => a.map(d => d.id === doc.id ? doc : d)); db.saveAcervoDoc(doc); };
   const removeAcervoDoc = (id) => { setAcervo(a => a.filter(d => d.id !== id)); db.removeAcervoDoc(id); };
@@ -3776,7 +3818,7 @@ export default function App() {
   if (view === "detalhe") screen = <Detalhe r={selected} back={() => nav("lista-cad")} interno openModal={setModal} currentUser={currentUser} onSendMsg={sendChatMsg} onReopenRequest={reopenRequest} onEditMsg={editChatMsg} onDeleteMsg={deleteChatMsg} acervo={acervo} onLiberarDoc={liberarDoc} onCancelarEnvio={cancelarEnvio} toast={toast} />;
   else if (view === "cliente") screen = <ClienteDetalhe nome={selId} requests={requests} users={users} nav={nav} />;
   else {
-    screen = { dash: <IntDash nav={nav} requests={requests} />, "lista-cad": <IntLista nav={nav} requests={requests} tipo="Cadastro" titulo="Solicitações de Cadastro" onMoverStatus={moverStatus} />, clientes: <Clientes requests={requests} users={users} nav={nav} />, acervo: (["ADMIN", "GESTOR"].includes(currentUser?.role) ? <AcervoDocs acervo={acervo} onAdd={addAcervoDoc} onUpdate={updateAcervoDoc} onRemove={removeAcervoDoc} toast={toast} /> : <IntDash nav={nav} requests={requests} />), usuarios: <Usuarios toast={toast} users={users} currentUser={currentUser} onAddUser={addUser} onUpdateUser={updateUser} onDeleteUser={removeUser} />, relatorios: <Relatorios toast={toast} requests={requests} />, config: <Config toast={toast} templates={templates} onSaveTemplates={saveTemplates} />, conta: <MinhaConta toast={toast} user={currentUser} /> }[view];
+    screen = { dash: <IntDash nav={nav} requests={requests} />, "lista-cad": <IntLista nav={nav} requests={requests} tipo="Cadastro" titulo="Solicitações de Cadastro" onMoverStatus={moverStatus} />, clientes: <Clientes requests={requests} users={users} nav={nav} />, acervo: (["ADMIN", "GESTOR"].includes(currentUser?.role) ? <AcervoDocs acervo={acervo} onAdd={addAcervoDoc} onUpdate={updateAcervoDoc} onRemove={removeAcervoDoc} toast={toast} /> : <IntDash nav={nav} requests={requests} />), usuarios: <Usuarios toast={toast} users={users} currentUser={currentUser} onAddUser={addUser} onUpdateUser={updateUser} onDeleteUser={removeUser} />, relatorios: <Relatorios toast={toast} requests={requests} />, config: <Config toast={toast} templates={templates} onSaveTemplates={saveTemplates} config={config} onSaveConfig={saveConfig} podeEditarRegras={["ADMIN", "GESTOR"].includes(currentUser?.role)} />, conta: <MinhaConta toast={toast} user={currentUser} /> }[view];
   }
 
   const visibleNotifs = notifications.filter(n => n.audience === "interno");
