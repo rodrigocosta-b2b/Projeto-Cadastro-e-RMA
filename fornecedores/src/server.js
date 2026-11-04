@@ -50,6 +50,7 @@
  *   PUT    /api/requests/:id {request}
  *   POST   /api/notifications | POST /api/notifications/read {ids:[]}
  *   PUT    /api/templates
+ *   PUT    /api/config {slaDias}               → prazo (dias, 1–90) das novas solicitações (ADMIN/GESTOR)
  *   GET    /api/acervo | PUT/DELETE /api/acervo/:id  (mutação: ADMIN/GESTOR)
  *   POST   /api/files | GET /api/files/:id[?download=1]
  *   GET    /api/reseller-lookup?cnpj=           → base de clientes gocase (Datamart)
@@ -382,6 +383,16 @@ async function getTemplates(env) {
   return r.rows && r.rows[0] ? parse(r.rows[0].v) : null;
 }
 
+/* Configurações gerais (Configurações → Regras de negócio), em kv 'config'.
+ * slaDias: prazo de análise das NOVAS solicitações (as abertas mantêm o prazo que receberam). */
+const CONFIG_PADRAO = { slaDias: 7 };
+const slaDiasValido = (v) => Number.isInteger(Number(v)) && Number(v) >= 1 && Number(v) <= 90;
+async function getConfig(env) {
+  const r = await env.DB.query("SELECT v FROM kv WHERE k = 'config'", []);
+  const salvo = (r.rows && r.rows[0] && parse(r.rows[0].v)) || {};
+  return { ...CONFIG_PADRAO, ...(slaDiasValido(salvo.slaDias) ? { slaDias: Number(salvo.slaDias) } : {}) };
+}
+
 async function saveNotification(env, n) {
   await env.DB.exec(
     `INSERT INTO notifications (id, audience, for_user_email, read, ts, payload)
@@ -593,11 +604,12 @@ async function createCadastro(env, body) {
 
   const now = Date.now();
   const year = fmtBR(now).slice(-4);
+  const { slaDias } = await getConfig(env);
   for (let tentativa = 0; tentativa < 5; tentativa++) {
     const id = `CAD-${year}-${String((await nextCadastroId(env, year)) + tentativa).padStart(3, "0")}`;
     const req = {
       id, tipo: "Cadastro", status: "NOVA", resp: "—", sla: "DENTRO", origem: "publico",
-      abertura: fmtBR(now), aberturaTs: now, prazo: fmtBR(now + 7 * 86400000),
+      abertura: fmtBR(now), aberturaTs: now, prazo: fmtBR(now + slaDias * 86400000), slaDias,
       ultimaAtualiz: fmtBRFull(now), ultimaAtualizTs: now,
       parceiro: dados.nomeFantasia || dados.razaoSocial || `CNPJ ${fmtCnpj(digits)}`,
       cnpj: fmtCnpj(digits), uf: dados.estado || "—", email: emailSolicitante || dados.email, ie: dados.inscricaoEstadual,
@@ -969,14 +981,27 @@ export default {
       }
 
       if (path === "/api/bootstrap" && method === "GET") {
-        const [users, requests, notifications, templates, acervo] = await Promise.all([
+        const [users, requests, notifications, templates, acervo, config] = await Promise.all([
           listUsers(env),
           listRequests(env),
           listNotifications(env),
           getTemplates(env),
           listAcervo(env),
+          getConfig(env),
         ]);
-        return json({ users, requests, notifications, templates, acervo });
+        return json({ users, requests, notifications, templates, acervo, config });
+      }
+
+      if (path === "/api/config" && method === "PUT") {
+        if (!isManager) return json({ error: "forbidden" }, 403);
+        const body = (await request.json().catch(() => null)) || null;
+        if (!body || !slaDiasValido(body.slaDias)) return json({ error: "invalid_sla" }, 400);
+        const config = { ...(await getConfig(env)), slaDias: Number(body.slaDias) };
+        await env.DB.exec(
+          "INSERT INTO kv (k, v) VALUES ('config', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+          [JSON.stringify(config)],
+        );
+        return json({ ok: true, config });
       }
 
       if (path === "/api/users") {
