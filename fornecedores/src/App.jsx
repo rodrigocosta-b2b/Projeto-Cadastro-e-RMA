@@ -1276,30 +1276,49 @@ function fmtDuration(ms) {
   const d = Math.floor(h / 24);
   return `${d}d ${h % 24}h`;
 }
+// Status em que o prazo deixa de correr: a decisão da equipe (aprovar ou negar) cumpre o SLA;
+// Concluída vem depois e não reabre a contagem.
+const SLA_PARADO = ["APROVADA", "NEGADA", "CONCLUIDA"];
+// Momento em que o SLA parou: início da sequência atual de status parados nas movimentações
+// (Aprovada em 29/10 e Concluída em 05/11 → 29/10). Voltar para análise (ex.: reabertura) volta
+// a contar. Chamados sem movimentações usam aprovadoTs/finalizadoTs/última atualização.
+function paradaSLA(r) {
+  if (!SLA_PARADO.includes(r.status)) return null;
+  let inicio = null;
+  for (const mv of (r.movimentos || []).filter(x => x && x.ts).sort((a, b) => a.ts - b.ts))
+    inicio = SLA_PARADO.includes(mv.status) ? (inicio || mv.ts) : null;
+  return inicio || r.aprovadoTs || r.finalizadoTs || r.ultimaAtualizTs || null;
+}
 function calcSLAMetrics(r) {
   const now = Date.now();
   const aberturaTs = r.aberturaTs || parseBR(r.abertura);
-  const prazoTs = r.prazoTs || parseBR(r.prazo);
+  // O prazo exibido é uma data ("02/11/2026"): vale até o fim desse dia.
+  const prazoTs = r.prazoTs || (parseBR(r.prazo) ? parseBR(r.prazo) + 86400000 - 1 : null);
   const ultimaAtualizTs = r.ultimaAtualizTs || aberturaTs;
   const finalizadoTs = ["CONCLUIDA", "NEGADA"].includes(r.status) ? (r.finalizadoTs || prazoTs || now) : null;
+  const paradaTs = paradaSLA(r);
   const tempoAberto = finalizadoTs ? finalizadoTs - aberturaTs : now - aberturaTs;
   const tempoAtendimento = finalizadoTs ? finalizadoTs - aberturaTs : null;
   const slaTotal = prazoTs && aberturaTs ? prazoTs - aberturaTs : 7 * 24 * 3600000;
-  const slaRestante = prazoTs ? prazoTs - now : null;
-  const slaPct = slaTotal > 0 ? Math.min(100, Math.round((tempoAberto / slaTotal) * 100)) : 0;
-  // O SLA é calculado na hora (o campo `sla` gravado na abertura nunca era atualizado).
-  // Encerrado (Concluída/Negada) conta pela data de encerramento; aberto, pelo momento atual.
+  const slaRestante = prazoTs && !paradaTs ? prazoTs - now : null;
+  const slaPct = slaTotal > 0 ? Math.min(100, Math.round((((paradaTs || now) - aberturaTs) / slaTotal) * 100)) : 0;
+  // Calculado na hora (o campo `sla` gravado na abertura nunca era atualizado): com decisão,
+  // compara a data da decisão com o prazo; sem decisão, o momento atual.
   let slaStatus = r.sla || "DENTRO";
   if (prazoTs) {
-    if (finalizadoTs) slaStatus = finalizadoTs > prazoTs ? "VENCIDO" : "DENTRO";
+    if (paradaTs) slaStatus = paradaTs > prazoTs ? "VENCIDO" : "DENTRO";
     else if (now > prazoTs) slaStatus = "VENCIDO";
     else if (prazoTs - now < 24 * 3600000) slaStatus = "PROXIMO";
     else slaStatus = "DENTRO";
   }
-  return { aberturaTs, prazoTs, ultimaAtualizTs, finalizadoTs, tempoAberto, tempoAtendimento, slaRestante, slaPct, slaStatus, slaTotal };
+  return { aberturaTs, prazoTs, ultimaAtualizTs, finalizadoTs, paradaTs, tempoAberto, tempoAtendimento, slaRestante, slaPct, slaStatus, slaTotal };
 }
-// SLA atual da solicitação — usar sempre este, nunca `r.sla` (fica parado em "DENTRO").
+// SLA da solicitação — usar sempre este, nunca `r.sla` (fica parado em "DENTRO"). Vale para
+// relatórios e indicadores de cumprimento, inclusive de chamados concluídos.
 const slaDe = (r) => calcSLAMetrics(r).slaStatus;
+// SLA para exibir em cards, lista e cabeçalho: chamado Concluído não mostra selo (o resultado
+// fica só no histórico/relatórios).
+const slaSelo = (r) => (r.status === "CONCLUIDA" ? null : SLA[slaDe(r)]);
 
 /* Busca de solicitações por solicitante (empresa, razão social, e-mail ou nome do
    solicitante), nº do cadastro ou CNPJ. Número sozinho ("8", "008") acha o protocolo de
@@ -1433,7 +1452,8 @@ function SLAPanel({ r }) {
       <div className="flex items-center gap-2 mb-3">
         <Clock size={16} style={{ color: C.coral }} />
         <h2 className="font-bold text-sm" style={{ color: C.text }}>Indicadores de SLA</h2>
-        <div className="ml-auto"><Pill {...slaInfo} /></div>
+        <div className="ml-auto">{slaSelo(r) ? <Pill {...slaInfo} />
+          : <span className="text-[11px]" style={{ color: C.muted }}>Histórico: {m.slaStatus === "VENCIDO" ? "decidido após o prazo" : "cumprido no prazo"}</span>}</div>
       </div>
       <div className="mb-4">
         <div className="flex justify-between text-xs mb-1" style={{ color: C.muted }}>
@@ -1443,6 +1463,11 @@ function SLAPanel({ r }) {
         <div className="rounded-full h-2.5 overflow-hidden" style={{ background: C.line }}>
           <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(100, m.slaPct)}%`, background: m.slaPct >= 100 ? C.coral : m.slaPct >= 80 ? C.yellow : C.green }} />
         </div>
+        {m.paradaTs && (
+          <div className="text-xs mt-1" style={{ color: C.muted }}>
+            Prazo encerrado na decisão em {new Date(m.paradaTs).toLocaleDateString("pt-BR")}{m.slaStatus === "VENCIDO" ? " (após o prazo)." : " (dentro do prazo)."}
+          </div>
+        )}
         {isOpen && m.slaRestante != null && (
           <div className="text-xs mt-1" style={{ color: m.slaRestante < 0 ? C.coral : C.muted }}>
             {m.slaRestante < 0 ? `Vencido há ${fmtDuration(Math.abs(m.slaRestante))}` : `Restam ${fmtDuration(m.slaRestante)}`}
@@ -1692,7 +1717,7 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
       <button onClick={back} className="flex items-center gap-1 text-sm mb-3" style={{ color: C.muted }}><ArrowLeft size={15} /> Voltar</button>
       <div className="flex items-center gap-3 mb-1 flex-wrap">
         <h1 className="text-2xl font-bold font-mono" style={{ color: C.text }}>{r.id}</h1>
-        <Pill {...STATUS[r.status]} /><Pill {...SLA[calcSLAMetrics(r).slaStatus]} />
+        <Pill {...STATUS[r.status]} />{slaSelo(r) && <Pill {...slaSelo(r)} />}
       </div>
       <p className="text-sm mb-4" style={{ color: C.muted }}>{r.tipo} · Aberta em {r.abertura} · Prazo SLA {r.prazo} · Responsável {r.resp}</p>
       <SLAPanel r={r} />
@@ -2340,7 +2365,7 @@ function IntDash({ nav, requests }) {
   const taxaAprov= (aprov + neg) > 0 ? Math.round((aprov/(aprov+neg))*100) : 0;
   const slaOk    = base.filter(r => ["DENTRO", "PROXIMO"].includes(slaDe(r))).length;
   const cumprSla = base.length > 0 ? Math.round((slaOk/base.length)*100) : 0;
-  const foraSla  = base.filter(r => slaDe(r) === "VENCIDO").length;
+  const foraSla  = base.filter(r => slaSelo(r) === SLA.VENCIDO).length; // concluídos ficam só no histórico
 
   const m = calcMetrics(base);
 
@@ -2629,7 +2654,7 @@ function KanbanCard({ r, nav, arrastavel }) {
       style={{ borderColor: C.line, cursor: arrastavel ? "grab" : "pointer" }}>
       <div className="flex items-center justify-between gap-2 mb-1.5">
         <span className="font-mono text-xs font-bold" style={{ color: C.coral }}>{r.id}</span>
-        <Pill {...SLA[slaDe(r)]} />
+        {slaSelo(r) && <Pill {...slaSelo(r)} />}
       </div>
       <div className="text-sm font-semibold mb-1 truncate" style={{ color: C.text }}>{r.parceiro}</div>
       <div className="text-xs mb-2 line-clamp-2" style={{ color: C.muted }}>{r.problema}</div>
@@ -2739,7 +2764,7 @@ function IntLista({ nav, requests, tipo, titulo, onMoverStatus }) {
             <td className="px-4 py-3" style={{ color: C.text }}>{r.parceiro}</td>
             <td className="px-4 py-3" style={{ color: C.muted }}>{r.uf}</td>
             <td className="px-4 py-3"><Pill {...STATUS[r.status]} /></td>
-            <td className="px-4 py-3"><Pill {...SLA[slaDe(r)]} /></td>
+            <td className="px-4 py-3">{slaSelo(r) ? <Pill {...slaSelo(r)} /> : <span style={{ color: C.muted }}>—</span>}</td>
             <td className="px-4 py-3" style={{ color: C.muted }}>{r.resp}</td>
             <td className="px-4 py-3"><ChevronRight size={16} style={{ color: C.muted }} /></td>
           </>
@@ -2835,7 +2860,7 @@ function ClienteDetalhe({ nome, requests, users, nav }) {
               <td className="px-4 py-3 font-mono font-semibold" style={{ color: C.coral }}>{r.id}</td>
               <td className="px-4 py-3" style={{ color: C.muted }}>{r.uf}</td>
               <td className="px-4 py-3"><Pill {...STATUS[r.status]} /></td>
-              <td className="px-4 py-3"><Pill {...SLA[slaDe(r)]} /></td>
+              <td className="px-4 py-3">{slaSelo(r) ? <Pill {...slaSelo(r)} /> : <span style={{ color: C.muted }}>—</span>}</td>
               <td className="px-4 py-3" style={{ color: C.muted }}>{r.abertura}</td>
               <td className="px-4 py-3"><ChevronRight size={16} style={{ color: C.muted }} /></td>
             </>
