@@ -525,7 +525,7 @@ const db = {
     }
     return (_ls.get(ACERVO_KEY, null) || DEFAULT_ACERVO).map(d => ({ id: d.id, nome: d.nome, descricao: d.descricao || "" }));
   },
-  // Envia a solicitação de cadastro. O servidor gera o protocolo (CAD-AAAA-NNNNNN).
+  // Envia a solicitação de cadastro. O servidor gera o protocolo (CAD-AAAA-NNN).
   async submitCadastro(payload) {
     if ((await dbMode()) === "remote") {
       try {
@@ -539,7 +539,7 @@ const db = {
     const now = new Date();
     const year = now.getFullYear();
     const nums = reqs.filter(r => r.id.startsWith(`CAD-${year}-`)).map(r => parseInt(r.id.split("-")[2], 10)).filter(n => !isNaN(n));
-    const id = `CAD-${year}-${String((nums.length ? Math.max(...nums) : 0) + 1).padStart(6, "0")}`;
+    const id = `CAD-${year}-${String((nums.length ? Math.max(...nums) : 0) + 1).padStart(3, "0")}`;
     const d = payload.dados || {};
     const acervoAll = _ls.get(ACERVO_KEY, null) || DEFAULT_ACERVO;
     const docs = acervoAll.filter(doc => (payload.docsSolicitados || []).includes(doc.id));
@@ -1139,13 +1139,7 @@ function Shell({ portal, view, nav, onLogout, notifOpen, setNotifOpen, user, not
   const qNorm = q.trim().toLowerCase();
   const qResults = useMemo(() => {
     if (qNorm.length < 2) return [];
-    return searchable
-      .filter(r =>
-        r.id?.toLowerCase().includes(qNorm) ||
-        r.cnpj?.toLowerCase().includes(qNorm) ||
-        r.parceiro?.toLowerCase().includes(qNorm)
-      )
-      .slice(0, 8);
+    return searchable.filter(r => casaBusca(r, qNorm)).slice(0, 8);
   }, [searchable, qNorm]);
 
   useEffect(() => {
@@ -1293,13 +1287,34 @@ function calcSLAMetrics(r) {
   const slaTotal = prazoTs && aberturaTs ? prazoTs - aberturaTs : 7 * 24 * 3600000;
   const slaRestante = prazoTs ? prazoTs - now : null;
   const slaPct = slaTotal > 0 ? Math.min(100, Math.round((tempoAberto / slaTotal) * 100)) : 0;
+  // O SLA é calculado na hora (o campo `sla` gravado na abertura nunca era atualizado).
+  // Encerrado (Concluída/Negada) conta pela data de encerramento; aberto, pelo momento atual.
   let slaStatus = r.sla || "DENTRO";
   if (prazoTs) {
-    if (now > prazoTs) slaStatus = "VENCIDO";
+    if (finalizadoTs) slaStatus = finalizadoTs > prazoTs ? "VENCIDO" : "DENTRO";
+    else if (now > prazoTs) slaStatus = "VENCIDO";
     else if (prazoTs - now < 24 * 3600000) slaStatus = "PROXIMO";
     else slaStatus = "DENTRO";
   }
   return { aberturaTs, prazoTs, ultimaAtualizTs, finalizadoTs, tempoAberto, tempoAtendimento, slaRestante, slaPct, slaStatus, slaTotal };
+}
+// SLA atual da solicitação — usar sempre este, nunca `r.sla` (fica parado em "DENTRO").
+const slaDe = (r) => calcSLAMetrics(r).slaStatus;
+
+/* Busca de solicitações por solicitante (empresa, razão social, e-mail ou nome do
+   solicitante), nº do cadastro ou CNPJ. Número sozinho ("8", "008") acha o protocolo de
+   sequência 8; CNPJ casa pelos dígitos, com ou sem pontuação. */
+const semAcento = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+function casaBusca(r, busca) {
+  const q = semAcento(busca).trim();
+  if (!q) return true;
+  const dq = q.replace(/\D/g, "");
+  const seq = parseInt(String(r.id || "").split("-")[2], 10);
+  if (/^\d{1,6}$/.test(q) && seq === parseInt(q, 10)) return true;
+  if (semAcento(r.id).includes(q)) return true;
+  if (dq.length >= 3 && String(r.cnpj || "").replace(/\D/g, "").includes(dq)) return true;
+  return [r.parceiro, r.dados?.razaoSocial, r.dados?.nomeFantasia, r.emailSolicitante, nomeSolicitante(r)]
+    .some(t => semAcento(t).includes(q));
 }
 
 // Opener do visualizador embutido — injetado pelo <DocViewer/> (SPA de instância única).
@@ -2277,8 +2292,8 @@ function calcMetrics(reqs) {
   const finalizados= reqs.filter(r =>  ["CONCLUIDA","NEGADA"].includes(r.status)).length;
   const aprovados  = reqs.filter(r => r.status === "APROVADA" || r.status === "CONCLUIDA").length;
   const negados    = reqs.filter(r => r.status === "NEGADA").length;
-  const dentroPrazo= reqs.filter(r => r.sla === "DENTRO" || r.sla === "PROXIMO").length;
-  const foraPrazo  = reqs.filter(r => r.sla === "VENCIDO").length;
+  const dentroPrazo= reqs.filter(r => ["DENTRO", "PROXIMO"].includes(slaDe(r))).length;
+  const foraPrazo  = reqs.filter(r => slaDe(r) === "VENCIDO").length;
   const taxaSLA    = total > 0 ? Math.round((dentroPrazo / total) * 100) : 0;
   const taxaAprov  = (aprovados + negados) > 0 ? Math.round((aprovados / (aprovados + negados)) * 100) : 0;
   const temposAtend= reqs.filter(r => r.finalizadoTs && r.aberturaTs).map(r => r.finalizadoTs - r.aberturaTs);
@@ -2323,9 +2338,9 @@ function IntDash({ nav, requests }) {
   const aprov    = count("APROVADA") + count("CONCLUIDA");
   const neg      = count("NEGADA");
   const taxaAprov= (aprov + neg) > 0 ? Math.round((aprov/(aprov+neg))*100) : 0;
-  const slaOk    = base.filter(r => r.sla==="DENTRO"||r.sla==="PROXIMO").length;
+  const slaOk    = base.filter(r => ["DENTRO", "PROXIMO"].includes(slaDe(r))).length;
   const cumprSla = base.length > 0 ? Math.round((slaOk/base.length)*100) : 0;
-  const foraSla  = base.filter(r => r.sla==="VENCIDO").length;
+  const foraSla  = base.filter(r => slaDe(r) === "VENCIDO").length;
 
   const m = calcMetrics(base);
 
@@ -2356,7 +2371,7 @@ function IntDash({ nav, requests }) {
 
   const slaDonut = [
     { name: "Dentro do SLA", value: m.dentroPrazo,                                    fill: C.green  },
-    { name: "Próximo",        value: base.filter(r=>r.sla==="PROXIMO").length,          fill: C.yellow },
+    { name: "Próximo",        value: base.filter(r => slaDe(r) === "PROXIMO").length,          fill: C.yellow },
     { name: "Fora",           value: m.foraPrazo,                                       fill: C.coral  },
   ].filter(d => d.value > 0);
   const slaTotal = slaDonut.reduce((a,b)=>a+b.value,0)||1;
@@ -2614,7 +2629,7 @@ function KanbanCard({ r, nav, arrastavel }) {
       style={{ borderColor: C.line, cursor: arrastavel ? "grab" : "pointer" }}>
       <div className="flex items-center justify-between gap-2 mb-1.5">
         <span className="font-mono text-xs font-bold" style={{ color: C.coral }}>{r.id}</span>
-        <Pill {...SLA[r.sla]} />
+        <Pill {...SLA[slaDe(r)]} />
       </div>
       <div className="text-sm font-semibold mb-1 truncate" style={{ color: C.text }}>{r.parceiro}</div>
       <div className="text-xs mb-2 line-clamp-2" style={{ color: C.muted }}>{r.problema}</div>
@@ -2690,14 +2705,24 @@ function ViewToggle({ viewMode, setViewMode }) {
 function IntLista({ nav, requests, tipo, titulo, onMoverStatus }) {
   const [f, setF] = useState("Todos");
   const [viewMode, setViewMode] = useState("board"); // "board" (cards) | "list"
+  const [busca, setBusca] = useState("");
   const base = requests.filter(r => r.tipo === tipo);
-  const rows = f === "Todos" ? base : base.filter(r => STATUS[r.status].label === f);
+  const rows = (f === "Todos" ? base : base.filter(r => STATUS[r.status].label === f)).filter(r => casaBusca(r, busca));
   return (
     <div>
       <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
         <div><h1 className="text-2xl font-bold" style={{ color: C.text }}>{titulo}</h1>{onMoverStatus && viewMode === "board" && <p className="text-xs" style={{ color: C.muted }}>Arraste os cards entre as colunas para mudar o status.</p>}</div>
         <ViewToggle viewMode={viewMode} setViewMode={setViewMode} />
       </div>
+      <Card className="p-3 mb-3">
+        <div className="relative">
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.muted }} />
+          <input value={busca} onChange={e => setBusca(e.target.value)} placeholder="Consultar por solicitante, nº do cadastro ou CNPJ…" aria-label="Consultar solicitações"
+            className="w-full rounded-xl border py-2 pl-9 pr-9 text-sm outline-none bg-white" style={{ borderColor: C.line }} />
+          {busca && <button onClick={() => setBusca("")} title="Limpar busca" aria-label="Limpar busca" className="absolute right-3 top-1/2 -translate-y-1/2" style={{ color: C.muted }}><X size={15} /></button>}
+        </div>
+        {busca.trim() && <div className="text-xs mt-2 px-1" style={{ color: C.muted }}>{rows.length === 0 ? `Nenhuma solicitação encontrada para "${busca.trim()}".` : `${rows.length} solicitaç${rows.length === 1 ? "ão encontrada" : "ões encontradas"}.`}</div>}
+      </Card>
       <Card className="p-3 mb-4 flex items-center gap-2 flex-wrap">
         <Filter size={15} style={{ color: C.muted }} />
         {["Todos", ...Object.values(STATUS).map(s => s.label)].map(l => (
@@ -2714,7 +2739,7 @@ function IntLista({ nav, requests, tipo, titulo, onMoverStatus }) {
             <td className="px-4 py-3" style={{ color: C.text }}>{r.parceiro}</td>
             <td className="px-4 py-3" style={{ color: C.muted }}>{r.uf}</td>
             <td className="px-4 py-3"><Pill {...STATUS[r.status]} /></td>
-            <td className="px-4 py-3"><Pill {...SLA[r.sla]} /></td>
+            <td className="px-4 py-3"><Pill {...SLA[slaDe(r)]} /></td>
             <td className="px-4 py-3" style={{ color: C.muted }}>{r.resp}</td>
             <td className="px-4 py-3"><ChevronRight size={16} style={{ color: C.muted }} /></td>
           </>
@@ -2810,7 +2835,7 @@ function ClienteDetalhe({ nome, requests, users, nav }) {
               <td className="px-4 py-3 font-mono font-semibold" style={{ color: C.coral }}>{r.id}</td>
               <td className="px-4 py-3" style={{ color: C.muted }}>{r.uf}</td>
               <td className="px-4 py-3"><Pill {...STATUS[r.status]} /></td>
-              <td className="px-4 py-3"><Pill {...SLA[r.sla]} /></td>
+              <td className="px-4 py-3"><Pill {...SLA[slaDe(r)]} /></td>
               <td className="px-4 py-3" style={{ color: C.muted }}>{r.abertura}</td>
               <td className="px-4 py-3"><ChevronRight size={16} style={{ color: C.muted }} /></td>
             </>
@@ -2970,7 +2995,7 @@ function relatorioHTML(tipo, requests) {
   const coral = C.coral;
   const statusList = [["NOVA", "Nova"], ["EM_ANALISE", "Em Análise"], ["AGUARDANDO", "Aguardando Inf."], ["APROVADA", "Aprovada"], ["NEGADA", "Negada"], ["CONCLUIDA", "Concluída"]];
   const cStatus = (s) => requests.filter(r => r.status === s).length;
-  const cSla = (s) => requests.filter(r => r.sla === s).length;
+  const cSla = (s) => requests.filter(r => slaDe(r) === s).length;
   const total = requests.length || 1;
 
   const bar = (val, max, color = coral) => {
