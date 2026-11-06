@@ -1739,7 +1739,7 @@ function DocEnvioItem({ d, acervo, interno, onLiberar, onCancelar }) {
 }
 
 /* ===================== Detalhe ===================== */
-function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopenRequest, onEditMsg, onDeleteMsg, acervo, onLiberarDoc, onCancelarEnvio, toast }) {
+function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopenRequest, onEditMsg, onDeleteMsg, acervo, onLiberarDoc, onCancelarEnvio, toast, onAbrirGoService }) {
   if (!r) return null;
   const tl = buildTimeline(r);
   return (
@@ -1871,6 +1871,12 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
                     <Btn icon={FileCheck}   variant="outline" color="#0077B6" onClick={() => openModal("fiscal")}>Setor Fiscal</Btn>
                     <Btn icon={TrendingUp}  variant="outline" color="#008B8B" onClick={() => openModal("financeiro")}>Setor Financeiro</Btn>
                   </div>
+                  {onAbrirGoService && (
+                    <div className="mt-3 flex items-center gap-3 flex-wrap">
+                      <Btn icon={ExternalLink} variant={r.status === "JURIDICO" ? "solid" : "outline"} color="#7B5EA7" onClick={onAbrirGoService}>Abrir chamado no Jurídico (GoService)</Btn>
+                      {r.goserviceJuridico?.preparadoTs && <span className="text-xs" style={{ color: C.muted }}>Formulário preparado em {new Date(r.goserviceJuridico.preparadoTs).toLocaleString("pt-BR")} por {r.goserviceJuridico.por}</span>}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -3330,6 +3336,175 @@ function Modal({ kind, onConfirm, onClose }) {
   );
 }
 
+/* ===================== Chamado jurídico no GoService ===================== */
+/* Prepara o chamado no formulário "Jurídico – Contratos" do GoService (GLPI/Formcreator,
+   formulário 60). A extensão do Chrome (pasta extensao-goservice/ do repositório) recebe o
+   pedido por window.postMessage, abre o formulário e preenche os campos; quem está logado
+   confere e clica em Enviar — nada é enviado sozinho. Área, gestor e objeto são fixos para
+   os cadastros B2B; tipo, filial e valor variam por chamado. */
+const GOSERVICE_FILIAIS = {
+  bb: ["36.838.707/0001-19", "36.838.707/0002-08", "36.838.707/0003-80"],
+  go: ["22.165.464/0001-90", "22.165.464/0002-71", "22.165.464/0003-52", "22.165.464/0004-33"],
+};
+const GOSERVICE_TIPOS = [
+  ["minuta da outra parte", "Análise de contrato/documento (minuta da outra parte)"],
+  ["minuta modelo GoGroup", "Análise de contrato/documento (minuta modelo GoGroup)"],
+];
+const GOSERVICE_VALORES = ["0 a R$50.000,00", "R$50.000,01 a R$200.000,00", "R$200.000,01 a R$1.000.000,00", "Acima de R$1.000.000,00"];
+const GOSERVICE_FIXOS = { area: "B2B", gestor: "igor.morais", objeto: "Contratos com Clientes", empresaGrupo: "Gocase", aditivo: "Não" };
+const extensaoGoService = () => (typeof document !== "undefined" && document.documentElement.getAttribute("data-gcf-goservice")) || "";
+
+function observacoesJuridico(r) {
+  const d = r.dados || {};
+  const emp = EMPRESA_NOME[r.empresaGocase] || "BB Indústria ou Go Comércio";
+  const linhas = [
+    `Solicitação de cadastro ${r.id} — plataforma de Cadastro de Fornecedores da gocase.`,
+    `Cliente: ${d.razaoSocial || r.parceiro}${d.nomeFantasia && d.nomeFantasia !== d.razaoSocial ? ` (${d.nomeFantasia})` : ""}\nCNPJ: ${r.cnpj} · IE: ${r.ie || "não informada"} · UF: ${r.uf || "—"}\nSolicitante: ${r.emailSolicitante || r.email || "—"}`,
+    `Resumo do objeto: cadastro da ${emp} como fornecedora do cliente, para que ele compre os produtos gocase.`,
+  ];
+  if ((r.docsSolicitados || []).length) linhas.push(`Documentos pedidos pelo cliente: ${r.docsSolicitados.join("; ")}.`);
+  if (r.mensagemCadastro) linhas.push(`Mensagem do cliente: ${r.mensagemCadastro}`);
+  linhas.push("Alinhamentos e condições comerciais: ");
+  return linhas.join("\n\n");
+}
+
+function ChamadoJuridicoGoService({ r, currentUser, onClose, onPreparado, toast }) {
+  const emp = r.empresaGocase === "go" ? "go" : r.empresaGocase === "bb" ? "bb" : "";
+  const [empresa, setEmpresa] = useState(emp || "bb");
+  const [filial, setFilial] = useState(GOSERVICE_FILIAIS[emp || "bb"][0]);
+  const [tipo, setTipo] = useState(GOSERVICE_TIPOS[0][0]);
+  const [valorFaixa, setValorFaixa] = useState("");
+  const [especifiqueValor, setEspecifiqueValor] = useState("");
+  const [especifiqueObjeto, setEspecifiqueObjeto] = useState(`Cadastro da gocase como fornecedora do cliente ${(r.dados && r.dados.razaoSocial) || r.parceiro} (B2B).`);
+  const [obs, setObs] = useState(() => observacoesJuridico(r));
+  const anexos = (r.anexos || []).filter(a => a && a.url);
+  const [marcados, setMarcados] = useState(() => anexos.map((_, i) => i));
+  const [enviando, setEnviando] = useState(false);
+  const [erro, setErro] = useState("");
+  const temExtensao = !!extensaoGoService();
+  const trocarEmpresa = (e) => { setEmpresa(e); setFilial(GOSERVICE_FILIAIS[e][0]); };
+
+  const abrir = async () => {
+    setErro("");
+    if (!valorFaixa) { setErro("Escolha a faixa de valor do contrato."); return; }
+    if (!obs.trim()) { setErro("As observações são obrigatórias no formulário do jurídico."); return; }
+    if (!extensaoGoService()) { setErro("A extensão do Chrome não foi encontrada nesta aba. Instale e recarregue a página."); return; }
+    setEnviando(true);
+    try {
+      const arquivos = [];
+      for (const i of marcados) {
+        const a = anexos[i];
+        const resp = await fetch(a.url, { credentials: "same-origin" });
+        if (!resp.ok) throw new Error(`Não foi possível baixar o anexo "${a.name}".`);
+        arquivos.push({ name: a.name || "anexo", type: a.type || "", blob: await resp.blob() });
+      }
+      const pedido = {
+        protocolo: r.id, email: currentUser?.email || "", razaoSocial: (r.dados && r.dados.razaoSocial) || r.parceiro,
+        empresaCnpj: filial, tipo, valorFaixa, especifiqueValor, especifiqueObjeto, observacoes: obs, arquivos, ...GOSERVICE_FIXOS,
+      };
+      const id = Math.random().toString(36).slice(2);
+      const resposta = await new Promise((ok) => {
+        const fim = setTimeout(() => { window.removeEventListener("message", h); ok({ ok: false, erro: "A extensão não respondeu." }); }, 20000);
+        function h(ev) {
+          if (ev.source !== window || !ev.data || ev.data.origem !== "gcf-ext" || ev.data.id !== id) return;
+          clearTimeout(fim); window.removeEventListener("message", h); ok(ev.data);
+        }
+        window.addEventListener("message", h);
+        window.postMessage({ origem: "gcf", tipo: "juridico-goservice", id, pedido }, location.origin);
+      });
+      if (!resposta.ok) throw new Error(resposta.erro || "A extensão não conseguiu abrir o GoService.");
+      onPreparado(r.id, { tipo, filial, valorFaixa, anexos: arquivos.length });
+      toast("GoService aberto em outra aba com o formulário preenchido — confira e clique em Enviar.");
+      onClose();
+    } catch (e) {
+      setErro(e?.message || "Não foi possível preparar o chamado.");
+    } finally { setEnviando(false); }
+  };
+
+  const rotulo = "text-xs font-semibold";
+  const entrada = "mt-1 w-full rounded-xl border px-3 py-2 text-sm bg-white";
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(30,30,42,.55)" }} onClick={onClose}>
+      <div className="w-full max-w-xl rounded-2xl bg-white p-6 max-h-[92vh] overflow-y-auto" style={{ border: `1px solid ${C.line}` }} onClick={e => e.stopPropagation()}>
+        <h2 className="text-lg font-bold mb-1" style={{ color: "#7B5EA7" }}>Abrir chamado no Jurídico (GoService)</h2>
+        <p className="text-sm mb-4" style={{ color: C.muted }}>A extensão abre o formulário "Jurídico – Contratos" já preenchido com os dados de {r.id}. Você confere lá e clica em Enviar.</p>
+        {!temExtensao && (
+          <div className="rounded-xl p-3 mb-4 text-xs" style={{ background: C.coralSoft, color: C.text }}>
+            <b>Extensão não encontrada.</b> Instale a extensão "Chamado Jurídico" no Chrome (pasta <code>extensao-goservice</code> do repositório — veja o LEIAME) e recarregue esta página.
+          </div>
+        )}
+        <div className="rounded-xl p-3 mb-4 text-xs grid sm:grid-cols-2 gap-x-4 gap-y-1" style={{ background: C.bg, color: C.muted }}>
+          <span>E-mail: <b style={{ color: C.text }}>{currentUser?.email || "—"}</b></span>
+          <span>Área: <b style={{ color: C.text }}>{GOSERVICE_FIXOS.area}</b></span>
+          <span>Gestor: <b style={{ color: C.text }}>{GOSERVICE_FIXOS.gestor}</b></span>
+          <span>Aditivo: <b style={{ color: C.text }}>Não</b></span>
+          <span className="sm:col-span-2">Objeto: <b style={{ color: C.text }}>Contratos com Clientes (B2B, parcerias, distribuição, revenda)</b></span>
+        </div>
+
+        <div className="mb-3">
+          <span className={rotulo} style={{ color: C.muted }}>Tipo de solicitação</span>
+          <div className="mt-1 space-y-1">
+            {GOSERVICE_TIPOS.map(([v, l]) => (
+              <label key={v} className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: C.text }}>
+                <input type="radio" name="gs-tipo" checked={tipo === v} onChange={() => setTipo(v)} style={{ accentColor: C.coral }} />{l}
+              </label>
+            ))}
+          </div>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-3 mb-3">
+          <div>
+            <label className={rotulo} style={{ color: C.muted }}>Empresa gocase{emp ? " (pela regra de IE/Gift)" : ""}</label>
+            <select value={empresa} onChange={e => trocarEmpresa(e.target.value)} className={entrada} style={{ borderColor: C.line }}>
+              <option value="bb">BB Indústria</option><option value="go">Go Comércio</option>
+            </select>
+          </div>
+          <div>
+            <label className={rotulo} style={{ color: C.muted }}>Filial (CNPJ)</label>
+            <select value={filial} onChange={e => setFilial(e.target.value)} className={entrada} style={{ borderColor: C.line }}>
+              {GOSERVICE_FILIAIS[empresa].map(c => <option key={c} value={c}>{c}{c.includes("/0001-") ? " (matriz)" : ""}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={rotulo} style={{ color: C.muted }}>Valor do contrato</label>
+            <select value={valorFaixa} onChange={e => setValorFaixa(e.target.value)} className={entrada} style={{ borderColor: valorFaixa || !erro ? C.line : C.danger }}>
+              <option value="">Selecione…</option>
+              {GOSERVICE_VALORES.map(v => <option key={v} value={v}>{v}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={rotulo} style={{ color: C.muted }}>Especifique o valor</label>
+            <input value={especifiqueValor} onChange={e => setEspecifiqueValor(e.target.value)} placeholder="R$ 15.000,00 por mês" className={entrada} style={{ borderColor: C.line }} />
+          </div>
+        </div>
+        <div className="mb-3">
+          <label className={rotulo} style={{ color: C.muted }}>Especifique o objeto</label>
+          <input value={especifiqueObjeto} onChange={e => setEspecifiqueObjeto(e.target.value)} className={entrada} style={{ borderColor: C.line }} />
+        </div>
+        <div className="mb-3">
+          <label className={rotulo} style={{ color: C.muted }}>Observações (vão no chamado)</label>
+          <textarea value={obs} onChange={e => setObs(e.target.value)} rows={8} className={entrada} style={{ borderColor: C.line }} />
+        </div>
+        <div className="mb-2">
+          <span className={rotulo} style={{ color: C.muted }}>Anexos do solicitante</span>
+          {anexos.length === 0 ? <p className="text-xs mt-1" style={{ color: C.muted }}>Nenhum anexo nesta solicitação — anexe as tratativas direto no formulário do GoService.</p>
+            : <div className="mt-1 space-y-1">{anexos.map((a, i) => (
+              <label key={i} className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: C.text }}>
+                <input type="checkbox" checked={marcados.includes(i)} onChange={e => setMarcados(m => e.target.checked ? [...m, i] : m.filter(x => x !== i))} style={{ accentColor: C.coral }} />
+                <Paperclip size={13} style={{ color: C.muted }} />{a.name || "anexo"}
+              </label>
+            ))}</div>}
+        </div>
+        {erro && <div className="text-xs font-semibold mt-3" style={{ color: C.danger }}>{erro}</div>}
+        <div className="flex gap-2 mt-5">
+          <button onClick={abrir} disabled={enviando} className="flex-1 rounded-xl py-2.5 text-sm font-bold text-white inline-flex items-center justify-center gap-2" style={{ background: "#7B5EA7", opacity: enviando ? .7 : 1 }}>
+            {enviando ? <Loader2 size={15} className="animate-spin" /> : <ExternalLink size={15} />}Abrir GoService preenchido
+          </button>
+          <button onClick={onClose} className="rounded-xl px-4 py-2.5 text-sm font-bold border" style={{ borderColor: C.line, color: C.muted }}>Agora não</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /* ===================== Acervo de documentos (admin/gestor) ===================== */
 /* Documento do acervo → { link, arquivo }. O link do Drive é só uma opção: o arquivo
@@ -3564,6 +3739,7 @@ export default function App() {
   const [notifications, setNotifications] = useState([]);
   const [templates, setTemplates] = useState(DEFAULT_TEMPLATES);
   const [config, setConfig] = useState(CONFIG_PADRAO);
+  const [goserviceId, setGoserviceId] = useState(null); // chamado com o modal do GoService aberto
   const [acervo, setAcervo] = useState(DEFAULT_ACERVO);
   const [publicAcervo, setPublicAcervo] = useState([]);
   const [toastMsg, setToastMsg] = useState(null);
@@ -3716,7 +3892,23 @@ export default function App() {
         ? `${req.id} submetida ao ${SETOR_LABEL[status]} por ${currentUser?.name || "Equipe gocase"}.`
         : `${req.id} atualizada para "${STATUS[status]?.label}" por ${currentUser?.name || "Equipe gocase"}.`;
       pushNotif({ message: msgInterna, requestId: req.id, color: cor, audience: "interno" });
+      if (status === "JURIDICO") setGoserviceId(req.id);
     }
+  };
+  // Registra no chamado que o formulário do jurídico foi preparado no GoService (o envio é
+  // feito por quem confere o formulário lá).
+  const registrarGoService = (reqId, info) => {
+    const req = requests.find(x => x.id === reqId);
+    if (!req) return;
+    const now = Date.now();
+    const quem = currentUser?.name || "Equipe gocase";
+    const updated = {
+      ...req, goserviceJuridico: { preparadoTs: now, por: quem, ...info },
+      ultimaAtualiz: new Date(now).toLocaleString("pt-BR"), ultimaAtualizTs: now,
+      movimentos: [...(req.movimentos || []), { status: req.status, actor: "user", who: quem, ts: now, text: "Chamado jurídico preenchido no GoService (formulário Jurídico – Contratos) para conferência e envio." }],
+    };
+    setRequests(rs => rs.map(x => (x.id === reqId ? updated : x)));
+    db.saveRequest(updated);
   };
 
   // Envio manual de um documento do acervo ao fornecedor (ou de um arquivo anexado no chamado).
@@ -3832,7 +4024,7 @@ export default function App() {
   const editChatMsg = (reqId, msgId, texto) => alterarChatMsg(reqId, msgId, (m, now) => ({ ...m, texto, editadaTs: now }));
   const deleteChatMsg = (reqId, msgId) => alterarChatMsg(reqId, msgId, (m, now) => ({ ...m, texto: "", arquivos: [], excluida: true, excluidaTs: now }));
 
-  if (view === "detalhe") screen = <Detalhe r={selected} back={() => nav("lista-cad")} interno openModal={setModal} currentUser={currentUser} onSendMsg={sendChatMsg} onReopenRequest={reopenRequest} onEditMsg={editChatMsg} onDeleteMsg={deleteChatMsg} acervo={acervo} onLiberarDoc={liberarDoc} onCancelarEnvio={cancelarEnvio} toast={toast} />;
+  if (view === "detalhe") screen = <Detalhe r={selected} back={() => nav("lista-cad")} interno openModal={setModal} currentUser={currentUser} onSendMsg={sendChatMsg} onReopenRequest={reopenRequest} onEditMsg={editChatMsg} onDeleteMsg={deleteChatMsg} acervo={acervo} onLiberarDoc={liberarDoc} onCancelarEnvio={cancelarEnvio} toast={toast} onAbrirGoService={() => setGoserviceId(selected.id)} />;
   else if (view === "cliente") screen = <ClienteDetalhe nome={selId} requests={requests} users={users} nav={nav} />;
   else {
     screen = { dash: <IntDash nav={nav} requests={requests} />, "lista-cad": <IntLista nav={nav} requests={requests} tipo="Cadastro" titulo="Solicitações de Cadastro" onMoverStatus={moverStatus} />, clientes: <Clientes requests={requests} users={users} nav={nav} />, acervo: (["ADMIN", "GESTOR"].includes(currentUser?.role) ? <AcervoDocs acervo={acervo} onAdd={addAcervoDoc} onUpdate={updateAcervoDoc} onRemove={removeAcervoDoc} toast={toast} /> : <IntDash nav={nav} requests={requests} />), usuarios: <Usuarios toast={toast} users={users} currentUser={currentUser} onAddUser={addUser} onUpdateUser={updateUser} onDeleteUser={removeUser} />, relatorios: <Relatorios toast={toast} requests={requests} />, config: <Config toast={toast} templates={templates} onSaveTemplates={saveTemplates} config={config} onSaveConfig={saveConfig} podeEditarRegras={["ADMIN", "GESTOR"].includes(currentUser?.role)} />, conta: <MinhaConta toast={toast} user={currentUser} /> }[view];
@@ -3855,6 +4047,7 @@ export default function App() {
         {screen}
       </Shell>
       {modal && <Modal kind={modal} onConfirm={confirmModal} onClose={() => setModal(null)} />}
+      {goserviceId && requests.some(x => x.id === goserviceId) && <ChamadoJuridicoGoService r={requests.find(x => x.id === goserviceId)} currentUser={currentUser} toast={toast} onPreparado={registrarGoService} onClose={() => setGoserviceId(null)} />}
       <DocViewer />
       <Toast />
     </>

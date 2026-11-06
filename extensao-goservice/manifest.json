@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "gocase Cadastro → Chamado Jurídico (GoService)",
+  "short_name": "Chamado Jurídico",
+  "version": "1.0.0",
+  "description": "Preenche o formulário Jurídico – Contratos do GoService com os dados de uma solicitação da plataforma de Cadastro de Fornecedores. Você confere e clica em Enviar.",
+  "permissions": [
+    "storage",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "https://goservice.gocase.com.br/*",
+    "https://gocase-cadastro-fornecedores.devgogroup.com/*"
+  ],
+  "background": {
+    "service_worker": "fundo.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://gocase-cadastro-fornecedores.devgogroup.com/*",
+        "http://localhost/*"
+      ],
+      "js": [
+        "plataforma.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://goservice.gocase.com.br/marketplace/formcreator/front/formdisplay.php*"
+      ],
+      "js": [
+        "goservice-ponte.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://goservice.gocase.com.br/marketplace/formcreator/front/formdisplay.php*"
+      ],
+      "js": [
+        "goservice-preencher.js"
+      ],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    }
+  ]
+}
