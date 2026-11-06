@@ -33,20 +33,21 @@ function useRecharts() {
 }
 
 /* ===================== Brand tokens — gocase ===================== */
-// Paletas de tema. Cores de marca (coral, yellow, cyan, violet, green) não mudam;
-// só os neutros (fundo, superfície, texto, linhas) trocam entre claro e escuro.
+// Paletas de tema. "coral" é o nome histórico da cor de destaque (hoje azul nos dois temas).
+// page = fundo da página; bg = preenchimento suave de chips, colunas do quadro e balões.
+// LIGHT: azul claro com fundo branco (sem o rosa antigo); danger é o vermelho semântico.
 const LIGHT = {
-  coral: "#F8475E", coralDark: "#E23652", coralSoft: "#FEEAED",
-  yellow: "#FFC247", ink: "#1E1E2A", bg: "#F7F7FA", line: "#ECECF1",
-  text: "#22222E", muted: "#8A8A99", cyan: "#00B8D9", violet: "#6C5CE7",
-  green: "#1FBF75", danger: "#F8475E", accent: "#D7E600", surface: "#FFFFFF",
+  coral: "#3F7FE0", coralDark: "#2C63B8", coralSoft: "#E7F0FD",
+  yellow: "#FFC247", ink: "#16213A", bg: "#F2F6FC", page: "#FFFFFF", line: "#E2E9F4",
+  text: "#1E2A3D", muted: "#7A879C", cyan: "#00B8D9", violet: "#6C5CE7",
+  green: "#1FBF75", danger: "#E5484D", accent: "#D7E600", surface: "#FFFFFF",
 };
 // DARK usa a paleta navy + amarelo-lima de referência (marca gogroup). "coral" vira o
 // azul-marinho de destaque (era vermelho); "danger" carrega o vermelho semântico que
 // antes vinha de coral (Negada, Fora do SLA, excluir), para não perder o sinal de alerta.
 const DARK = {
   coral: "#3A6FC4", coralDark: "#0E1F44", coralSoft: "rgba(58,111,196,0.16)",
-  yellow: "#FFC247", ink: "#0A1220", bg: "#0A1220", line: "#223154",
+  yellow: "#FFC247", ink: "#0A1220", bg: "#0A1220", page: "#0A1220", line: "#223154",
   text: "#F2F5FB", muted: "#93A1C2", cyan: "#00B8D9", violet: "#8E7DF5",
   green: "#27C77F", danger: "#F76B62", accent: "#D7E600", surface: "#121D38",
 };
@@ -109,6 +110,20 @@ const StatCard = ({ icon: Icon, label, value, color, onClick }) => (
     <div><div className="text-3xl font-bold" style={{ color: C.text }}>{value}</div>
       <div className="text-xs" style={{ color: C.muted }}>{label}</div></div>
   </Card>
+);
+/* Logo da plataforma ("Ficha aprovada": ficha de cadastro com selo de check). O mesmo
+   desenho é o ícone da aba (favicon em index.html). Cores fixas: funciona nos dois temas. */
+const LogoMarca = ({ size = 30 }) => (
+  <svg width={size} height={size} viewBox="0 0 64 64" role="img" aria-label="Logo gocase Cadastro de Fornecedores" className="shrink-0">
+    <rect width="64" height="64" rx="14" fill="#0E1F44" />
+    <path d="M18 11h19l11 11v29a4 4 0 0 1-4 4H18a4 4 0 0 1-4-4V15a4 4 0 0 1 4-4z" fill="#FFFFFF" />
+    <path d="M37 11v8a3 3 0 0 0 3 3h8z" fill="#BFD4F6" />
+    <rect x="20" y="25" width="18" height="3.5" rx="1.75" fill="#BFD4F6" />
+    <rect x="20" y="32" width="13" height="3.5" rx="1.75" fill="#BFD4F6" />
+    <rect x="20" y="39" width="8" height="3.5" rx="1.75" fill="#BFD4F6" />
+    <circle cx="45" cy="46" r="11" fill="#3A6FC4" stroke="#0E1F44" strokeWidth="3" />
+    <path d="M40 46.2l3.6 3.6 6.6-7" fill="none" stroke="#FFFFFF" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
 );
 const Btn = ({ children, onClick, variant = "solid", color = C.coral, icon: Icon, disabled = false }) => {
   const base = "inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition";
@@ -907,7 +922,7 @@ const AuthShell = ({ children }) => (
   <div className="min-h-screen flex items-center justify-center p-6" style={{ background: `linear-gradient(150deg, ${C.coral}, ${C.coralDark})` }}>
     <div className="w-full max-w-4xl grid md:grid-cols-2 rounded-3xl overflow-hidden shadow-2xl bg-white">
       <div className="hidden md:flex flex-col justify-between p-10 text-white" style={{ background: `linear-gradient(160deg, ${C.coral}, ${C.coralDark})` }}>
-        <div className="text-3xl font-extrabold lowercase tracking-tight">gocase</div>
+        <div className="flex items-center gap-3"><LogoMarca size={40} /><span className="text-3xl font-extrabold lowercase tracking-tight">gocase</span></div>
         <div>
           <div className="text-2xl font-bold leading-snug">Cadastro de Fornecedores</div>
           <p className="mt-3 text-sm opacity-90 leading-relaxed">Solicitações de cadastro da gocase (BB Indústria e Go Comércio) como fornecedora, com acompanhamento de ponta a ponta.</p>
@@ -967,9 +982,10 @@ function Login({ onLogin, goBack }) {
 function PublicShell({ view, setView, themePref, onCycleTheme, children }) {
   const tabs = [["form", "Solicitar cadastro", Building2], ["status", "Acompanhar solicitação", Search]];
   return (
-    <div className="min-h-screen" style={{ background: C.bg }}>
+    <div className="min-h-screen" style={{ background: C.page }}>
       <header className="h-16 flex items-center px-4 gap-4 text-white sticky top-0 z-30" style={{ background: C.coral }}>
         <div onClick={() => setView("form")} className="flex items-center gap-2 cursor-pointer shrink-0">
+          <LogoMarca size={30} />
           <span className="text-xl font-extrabold lowercase tracking-tight">gocase</span>
           <span className="text-xs opacity-80 hidden sm:inline whitespace-nowrap">Cadastro de Fornecedores</span>
         </div>
@@ -1174,14 +1190,15 @@ function Shell({ portal, view, nav, onLogout, notifOpen, setNotifOpen, user, not
     } catch (e) { }
   };
   return (
-    <div className="min-h-screen" style={{ background: C.bg }}>
+    <div className="min-h-screen" style={{ background: C.page }}>
       <header className="h-16 flex items-center px-4 gap-4 text-white sticky top-0 z-30" style={{ background: C.coral }}>
         <button onClick={() => setMobileNavOpen(v => !v)} className="md:hidden opacity-90 hover:opacity-100 shrink-0" title="Abrir menu" aria-label="Abrir menu">
           <Menu size={22} />
         </button>
-        <div onClick={() => nav(portal === "externo" ? "inicio" : "dash")} className="flex items-center gap-2 w-auto md:w-60 cursor-pointer shrink-0">
+        <div onClick={() => nav(portal === "externo" ? "inicio" : "dash")} className="flex items-center gap-2 w-auto md:w-60 xl:w-72 cursor-pointer shrink-0">
+          <LogoMarca size={30} />
           <span className="text-xl font-extrabold lowercase tracking-tight">gocase</span>
-          <span className="text-xs opacity-80 hidden sm:inline whitespace-nowrap">Cadastro de Fornecedores</span>
+          <span className="text-xs opacity-80 hidden xl:inline whitespace-nowrap">Cadastro de Fornecedores</span>
         </div>
         <div className="flex-1 max-w-xl relative" ref={searchBoxRef}>
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 opacity-70" />
@@ -2885,7 +2902,7 @@ function ClienteDetalhe({ nome, requests, users, nav }) {
 }
 
 const ROLE_LABEL = { ADMIN: "Administrador", GESTOR: "Gestor", COLABORADOR: "Colaborador", CLIENTE: "Cliente" };
-const ROLE_COLOR = { ADMIN: "#F8475E", GESTOR: "#6C5CE7", COLABORADOR: "#00B8D9", CLIENTE: "#1FBF75" };
+const ROLE_COLOR = { ADMIN: "#2C63B8", GESTOR: "#6C5CE7", COLABORADOR: "#00B8D9", CLIENTE: "#1FBF75" };
 
 function Usuarios({ toast, users, currentUser, onAddUser, onUpdateUser, onDeleteUser }) {
   const isAdmin = currentUser?.role === "ADMIN";
@@ -3079,7 +3096,7 @@ function relatorioHTML(tipo, requests) {
       <table>${tableRows([
         ["Dentro do prazo", dentro, total, "#1FBF75"],
         ["Próximo do vencimento", prox, total, "#FFC247"],
-        ["Fora do prazo", fora, total, "#F8475E"],
+        ["Fora do prazo", fora, total, "#E5484D"],
       ])}</table>`;
   } else {
     title = "Análise setorial";
@@ -3766,7 +3783,7 @@ export default function App() {
 
   if (!authChecked) return (
     <><Fonts />
-      <div className="min-h-screen flex items-center justify-center gap-2" style={{ background: C.bg }}>
+      <div className="min-h-screen flex items-center justify-center gap-2" style={{ background: C.page }}>
         <Loader2 className="animate-spin" size={20} style={{ color: C.coral }} />
         <span className="text-sm" style={{ color: C.muted }}>Carregando…</span>
       </div>
