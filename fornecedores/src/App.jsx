@@ -3340,8 +3340,12 @@ function Modal({ kind, onConfirm, onClose }) {
 /* Prepara o chamado no formulário "Jurídico – Contratos" do GoService (GLPI/Formcreator,
    formulário 60). A extensão do Chrome (pasta extensao-goservice/ do repositório) recebe o
    pedido por window.postMessage, abre o formulário e preenche os campos; quem está logado
-   confere e clica em Enviar — nada é enviado sozinho. Área, gestor e objeto são fixos para
-   os cadastros B2B; tipo, filial e valor variam por chamado. */
+   confere e clica em Enviar — nada é enviado sozinho.
+   O próprio chamado decide o resto (analisarDocsJuridico): lê os documentos do solicitante
+   (anexos do formulário e do chat — texto dos PDFs + nome do arquivo), classifica cada um
+   (Código de Conduta, NDA, Ordem de Compra, Contrato ou outro) e daí tira o objeto e o tipo;
+   a empresa (BB/Go) vem da solicitação, com o CNPJ da matriz; o valor em R$ encontrado nos
+   documentos ou na mensagem sugere a faixa. Tudo fica editável na janela antes de abrir. */
 const GOSERVICE_FILIAIS = {
   bb: ["36.838.707/0001-19", "36.838.707/0002-08", "36.838.707/0003-80"],
   go: ["22.165.464/0001-90", "22.165.464/0002-71", "22.165.464/0003-52", "22.165.464/0004-33"],
@@ -3351,10 +3355,112 @@ const GOSERVICE_TIPOS = [
   ["minuta modelo GoGroup", "Análise de contrato/documento (minuta modelo GoGroup)"],
 ];
 const GOSERVICE_VALORES = ["0 a R$50.000,00", "R$50.000,01 a R$200.000,00", "R$200.000,01 a R$1.000.000,00", "Acima de R$1.000.000,00"];
-const GOSERVICE_FIXOS = { area: "B2B", gestor: "igor.morais", objeto: "Contratos com Clientes", empresaGrupo: "Gocase", aditivo: "Não" };
+// Objeto do contrato no GoService (início do texto da opção, que a extensão usa para escolher).
+const GOSERVICE_OBJETOS = [
+  ["Contratos com Clientes", "Contratos com Clientes (B2B, parcerias, distribuição, revenda)"],
+  ["Acordo de Confidencialidade", "Acordo de Confidencialidade (NDA)"],
+  ["Código de Conduta", "Código de Conduta"],
+];
+const GOSERVICE_FIXOS = { area: "B2B", gestor: "igor.morais", empresaGrupo: "Gocase", aditivo: "Não" };
 const extensaoGoService = () => (typeof document !== "undefined" && document.documentElement.getAttribute("data-gcf-goservice")) || "";
 
-function observacoesJuridico(r) {
+// Classes de documento → rótulo, objeto no GoService e prioridade (o mais "contratual" manda).
+const CLASSE_DOC = {
+  contrato: { rotulo: "Contrato", objeto: "Contratos com Clientes", prio: 5 },
+  ordem: { rotulo: "Ordem de Compra", objeto: "Contratos com Clientes", prio: 4 },
+  nda: { rotulo: "NDA", objeto: "Acordo de Confidencialidade", prio: 3 },
+  codigo: { rotulo: "Código de Conduta", objeto: "Código de Conduta", prio: 2 },
+  outro: { rotulo: "Outro documento", objeto: "Contratos com Clientes", prio: 1 },
+};
+// Ordem importa: NDA e Código de Conduta também falam em "contrato"/"cláusula".
+function classificarDocumento(nome, texto) {
+  const testar = (t) => {
+    if (/codigo de (conduta|etica)|code of conduct/.test(t)) return "codigo";
+    if (/acordo de confidencialidade|termo de confidencialidade|compromisso de confidencialidade|non.?disclosure|\bnda\b/.test(t)) return "nda";
+    if (/ordem de compra|pedido de compra|purchase order|\bpo\s*n/.test(t)) return "ordem";
+    if (/\bcontrato\b|clausula|contratante|contratada|instrumento particular/.test(t)) return "contrato";
+    return "";
+  };
+  return testar(semAcento(nome)) || testar(semAcento(texto).slice(0, 20000)) || "outro";
+}
+// Valores em reais ("R$ 12.500,00", "R$12500") → números.
+function valoresEmReais(texto) {
+  return [...String(texto || "").matchAll(/R\$\s*(\d{1,3}(?:\.\d{3})+|\d+)(?:,(\d{2}))?/g)]
+    .map(m => Number(m[1].replace(/\./g, "")) + (m[2] ? Number(m[2]) / 100 : 0)).filter(v => v > 0);
+}
+const fmtReais = (v) => v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+const faixaDoValor = (v) => (v <= 50000 ? GOSERVICE_VALORES[0] : v <= 200000 ? GOSERVICE_VALORES[1] : v <= 1000000 ? GOSERVICE_VALORES[2] : GOSERVICE_VALORES[3]);
+
+// pdf.js carregado só quando a janela do jurídico abre (lê o texto das primeiras páginas).
+let _pdfjs = null;
+function carregarPdfJs() {
+  if (!_pdfjs) _pdfjs = new Promise((ok, erro) => {
+    if (window.pdfjsLib) return ok(window.pdfjsLib);
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    s.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"; ok(window.pdfjsLib); };
+    s.onerror = () => { _pdfjs = null; erro(new Error("Não foi possível carregar o leitor de PDF.")); };
+    document.head.appendChild(s);
+  });
+  return _pdfjs;
+}
+async function textoDoPdf(blob, maxPaginas = 6) {
+  const pdfjs = await carregarPdfJs();
+  const pdf = await pdfjs.getDocument({ data: await blob.arrayBuffer() }).promise;
+  let t = "";
+  for (let i = 1; i <= Math.min(pdf.numPages, maxPaginas); i++) {
+    const conteudo = await (await pdf.getPage(i)).getTextContent();
+    t += " " + conteudo.items.map(x => x.str).join(" ");
+  }
+  return t;
+}
+
+// Documentos do solicitante: anexos do formulário + anexos que ele mandou no chat.
+function docsDoSolicitante(r) {
+  const vistos = new Set();
+  const lista = [...(r.anexos || []).map(a => ({ ...a, origem: "formulário" })),
+    ...(r.chat || []).filter(m => m.role === "cliente" && !m.excluida).flatMap(m => (m.arquivos || []).map(a => ({ ...a, origem: "chat" })))];
+  return lista.filter(a => a && a.url && !vistos.has(a.url) && vistos.add(a.url));
+}
+async function analisarDocsJuridico(r) {
+  const docs = [];
+  const valores = [];
+  for (const a of docsDoSolicitante(r)) {
+    let blob = null, texto = "", aviso = "";
+    try {
+      const resp = await fetch(a.url, { credentials: "same-origin" });
+      if (resp.ok) blob = await resp.blob(); else aviso = "não foi possível baixar";
+    } catch (e) { aviso = "não foi possível baixar"; }
+    const ehPdf = /pdf/i.test(a.type || (blob && blob.type) || "") || /\.pdf$/i.test(a.name || "");
+    if (blob && ehPdf) {
+      try { texto = await textoDoPdf(blob); if (!texto.trim()) aviso = "PDF sem texto (digitalizado) — classificado pelo nome"; }
+      catch (e) { aviso = "não foi possível ler o PDF — classificado pelo nome"; }
+    }
+    const classe = classificarDocumento(a.name || "", texto);
+    for (const v of valoresEmReais(texto)) valores.push({ v, fonte: a.name || "anexo" });
+    docs.push({ name: a.name || "anexo", type: a.type || (blob && blob.type) || "", origem: a.origem, blob, classe, aviso });
+  }
+  for (const [texto, fonte] of [[r.mensagemCadastro, "mensagem do cliente"], [r.listaDocumentos, "lista de documentos"],
+    ...(r.chat || []).filter(m => m.role === "cliente" && !m.excluida).map(m => [m.texto, "chat"])]) {
+    for (const v of valoresEmReais(texto)) valores.push({ v, fonte });
+  }
+  const principal = docs.reduce((m, d) => (!m || CLASSE_DOC[d.classe].prio > CLASSE_DOC[m.classe].prio ? d : m), null);
+  const maior = valores.reduce((m, x) => (!m || x.v > m.v ? x : m), null);
+  return { docs, principal, valor: maior };
+}
+
+function especifiqueObjetoPadrao(classe, r, emp) {
+  const cliente = (r.dados && r.dados.razaoSocial) || r.parceiro;
+  const empresa = EMPRESA_NOME[emp] || "gocase";
+  return {
+    contrato: `Contrato enviado pelo cliente ${cliente} para o fornecimento de produtos pela ${empresa}.`,
+    ordem: `Ordem de compra do cliente ${cliente} para o fornecimento de produtos pela ${empresa}.`,
+    nda: `Acordo de confidencialidade enviado pelo cliente ${cliente} para assinatura da ${empresa}.`,
+    codigo: `Código de conduta do cliente ${cliente} para aceite da ${empresa} como fornecedora.`,
+  }[classe] || `Cadastro da ${empresa} como fornecedora do cliente ${cliente} (B2B).`;
+}
+
+function observacoesJuridico(r, analise) {
   const d = r.dados || {};
   const emp = EMPRESA_NOME[r.empresaGocase] || "BB Indústria ou Go Comércio";
   const linhas = [
@@ -3362,6 +3468,7 @@ function observacoesJuridico(r) {
     `Cliente: ${d.razaoSocial || r.parceiro}${d.nomeFantasia && d.nomeFantasia !== d.razaoSocial ? ` (${d.nomeFantasia})` : ""}\nCNPJ: ${r.cnpj} · IE: ${r.ie || "não informada"} · UF: ${r.uf || "—"}\nSolicitante: ${r.emailSolicitante || r.email || "—"}`,
     `Resumo do objeto: cadastro da ${emp} como fornecedora do cliente, para que ele compre os produtos gocase.`,
   ];
+  if (analise && analise.docs.length) linhas.push(`Documentos do cliente para análise: ${analise.docs.map(x => `${x.name} (${CLASSE_DOC[x.classe].rotulo})`).join("; ")}.`);
   if ((r.docsSolicitados || []).length) linhas.push(`Documentos pedidos pelo cliente: ${r.docsSolicitados.join("; ")}.`);
   if (r.mensagemCadastro) linhas.push(`Mensagem do cliente: ${r.mensagemCadastro}`);
   linhas.push("Alinhamentos e condições comerciais: ");
@@ -3370,19 +3477,39 @@ function observacoesJuridico(r) {
 
 function ChamadoJuridicoGoService({ r, currentUser, onClose, onPreparado, toast }) {
   const emp = r.empresaGocase === "go" ? "go" : r.empresaGocase === "bb" ? "bb" : "";
+  const [analisando, setAnalisando] = useState(true);
+  const [analise, setAnalise] = useState(null);
   const [empresa, setEmpresa] = useState(emp || "bb");
   const [filial, setFilial] = useState(GOSERVICE_FILIAIS[emp || "bb"][0]);
   const [tipo, setTipo] = useState(GOSERVICE_TIPOS[0][0]);
+  const [objeto, setObjeto] = useState(GOSERVICE_OBJETOS[0][0]);
   const [valorFaixa, setValorFaixa] = useState("");
   const [especifiqueValor, setEspecifiqueValor] = useState("");
-  const [especifiqueObjeto, setEspecifiqueObjeto] = useState(`Cadastro da gocase como fornecedora do cliente ${(r.dados && r.dados.razaoSocial) || r.parceiro} (B2B).`);
-  const [obs, setObs] = useState(() => observacoesJuridico(r));
-  const anexos = (r.anexos || []).filter(a => a && a.url);
-  const [marcados, setMarcados] = useState(() => anexos.map((_, i) => i));
+  const [especifiqueObjeto, setEspecifiqueObjeto] = useState(() => especifiqueObjetoPadrao("", r, emp));
+  const [obs, setObs] = useState(() => observacoesJuridico(r, null));
+  const [marcados, setMarcados] = useState([]);
   const [enviando, setEnviando] = useState(false);
   const [erro, setErro] = useState("");
   const temExtensao = !!extensaoGoService();
   const trocarEmpresa = (e) => { setEmpresa(e); setFilial(GOSERVICE_FILIAIS[e][0]); };
+
+  // Ao abrir: lê os documentos do solicitante e preenche tipo, objeto e valor.
+  useEffect(() => {
+    let vivo = true;
+    analisarDocsJuridico(r).then((a) => {
+      if (!vivo) return;
+      setAnalise(a);
+      const classe = a.principal ? a.principal.classe : "";
+      setTipo(a.docs.length ? "minuta da outra parte" : "minuta modelo GoGroup");
+      setObjeto(classe ? CLASSE_DOC[classe].objeto : GOSERVICE_OBJETOS[0][0]);
+      setEspecifiqueObjeto(especifiqueObjetoPadrao(classe, r, emp));
+      if (a.valor) { setValorFaixa(faixaDoValor(a.valor.v)); setEspecifiqueValor(fmtReais(a.valor.v)); }
+      setObs(observacoesJuridico(r, a));
+      setMarcados(a.docs.map((d, i) => (d.blob ? i : -1)).filter(i => i >= 0));
+    }).catch(() => vivo && setAnalise({ docs: [], principal: null, valor: null }))
+      .finally(() => vivo && setAnalisando(false));
+    return () => { vivo = false; };
+  }, [r.id]);
 
   const abrir = async () => {
     setErro("");
@@ -3391,16 +3518,10 @@ function ChamadoJuridicoGoService({ r, currentUser, onClose, onPreparado, toast 
     if (!extensaoGoService()) { setErro("A extensão do Chrome não foi encontrada nesta aba. Instale e recarregue a página."); return; }
     setEnviando(true);
     try {
-      const arquivos = [];
-      for (const i of marcados) {
-        const a = anexos[i];
-        const resp = await fetch(a.url, { credentials: "same-origin" });
-        if (!resp.ok) throw new Error(`Não foi possível baixar o anexo "${a.name}".`);
-        arquivos.push({ name: a.name || "anexo", type: a.type || "", blob: await resp.blob() });
-      }
+      const arquivos = marcados.map(i => analise.docs[i]).filter(d => d && d.blob).map(d => ({ name: d.name, type: d.type, blob: d.blob }));
       const pedido = {
         protocolo: r.id, email: currentUser?.email || "", razaoSocial: (r.dados && r.dados.razaoSocial) || r.parceiro,
-        empresaCnpj: filial, tipo, valorFaixa, especifiqueValor, especifiqueObjeto, observacoes: obs, arquivos, ...GOSERVICE_FIXOS,
+        empresaCnpj: filial, tipo, objeto, valorFaixa, especifiqueValor, especifiqueObjeto, observacoes: obs, arquivos, ...GOSERVICE_FIXOS,
       };
       const id = Math.random().toString(36).slice(2);
       const resposta = await new Promise((ok) => {
@@ -3413,7 +3534,7 @@ function ChamadoJuridicoGoService({ r, currentUser, onClose, onPreparado, toast 
         window.postMessage({ origem: "gcf", tipo: "juridico-goservice", id, pedido }, location.origin);
       });
       if (!resposta.ok) throw new Error(resposta.erro || "A extensão não conseguiu abrir o GoService.");
-      onPreparado(r.id, { tipo, filial, valorFaixa, anexos: arquivos.length });
+      onPreparado(r.id, { tipo, objeto, filial, valorFaixa, anexos: arquivos.length });
       toast("GoService aberto em outra aba com o formulário preenchido — confira e clique em Enviar.");
       onClose();
     } catch (e) {
@@ -3423,40 +3544,59 @@ function ChamadoJuridicoGoService({ r, currentUser, onClose, onPreparado, toast 
 
   const rotulo = "text-xs font-semibold";
   const entrada = "mt-1 w-full rounded-xl border px-3 py-2 text-sm bg-white";
+  const principal = analise && analise.principal;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(30,30,42,.55)" }} onClick={onClose}>
       <div className="w-full max-w-xl rounded-2xl bg-white p-6 max-h-[92vh] overflow-y-auto" style={{ border: `1px solid ${C.line}` }} onClick={e => e.stopPropagation()}>
         <h2 className="text-lg font-bold mb-1" style={{ color: "#7B5EA7" }}>Abrir chamado no Jurídico (GoService)</h2>
-        <p className="text-sm mb-4" style={{ color: C.muted }}>A extensão abre o formulário "Jurídico – Contratos" já preenchido com os dados de {r.id}. Você confere lá e clica em Enviar.</p>
+        <p className="text-sm mb-4" style={{ color: C.muted }}>Os campos vêm de {r.id}: documentos do cliente, empresa da solicitação e valores encontrados. Confira, ajuste se precisar e abra — o envio é feito por você no GoService.</p>
         {!temExtensao && (
           <div className="rounded-xl p-3 mb-4 text-xs" style={{ background: C.coralSoft, color: C.text }}>
             <b>Extensão não encontrada.</b> Instale a extensão "Chamado Jurídico" no Chrome (pasta <code>extensao-goservice</code> do repositório — veja o LEIAME) e recarregue esta página.
           </div>
         )}
-        <div className="rounded-xl p-3 mb-4 text-xs grid sm:grid-cols-2 gap-x-4 gap-y-1" style={{ background: C.bg, color: C.muted }}>
-          <span>E-mail: <b style={{ color: C.text }}>{currentUser?.email || "—"}</b></span>
-          <span>Área: <b style={{ color: C.text }}>{GOSERVICE_FIXOS.area}</b></span>
-          <span>Gestor: <b style={{ color: C.text }}>{GOSERVICE_FIXOS.gestor}</b></span>
-          <span>Aditivo: <b style={{ color: C.text }}>Não</b></span>
-          <span className="sm:col-span-2">Objeto: <b style={{ color: C.text }}>Contratos com Clientes (B2B, parcerias, distribuição, revenda)</b></span>
+
+        <div className="rounded-xl p-3 mb-4 text-sm" style={{ background: C.bg }}>
+          <div className="text-xs font-semibold mb-2" style={{ color: C.muted }}>Documentos do cliente</div>
+          {analisando ? (
+            <div className="flex items-center gap-2 text-xs" style={{ color: C.muted }}><Loader2 size={14} className="animate-spin" />Lendo os documentos do chamado…</div>
+          ) : !analise || analise.docs.length === 0 ? (
+            <p className="text-xs" style={{ color: C.muted }}>O cliente não enviou documentos — tipo "minuta modelo GoGroup". Anexe as tratativas direto no GoService, se houver.</p>
+          ) : (
+            <div className="space-y-1.5">
+              {analise.docs.map((d, i) => (
+                <label key={i} className="flex items-start gap-2 text-sm cursor-pointer" style={{ color: C.text }}>
+                  <input type="checkbox" className="mt-1" disabled={!d.blob} checked={marcados.includes(i)} onChange={e => setMarcados(m => e.target.checked ? [...m, i] : m.filter(x => x !== i))} style={{ accentColor: C.coral }} />
+                  <span className="min-w-0">
+                    <span className="inline-flex items-center gap-1"><Paperclip size={13} style={{ color: C.muted }} />{d.name}</span>
+                    <span className="ml-2 text-[11px] font-semibold rounded-full px-2 py-0.5" style={{ background: d === principal ? "#7B5EA722" : C.line, color: d === principal ? "#7B5EA7" : C.muted }}>{CLASSE_DOC[d.classe].rotulo}</span>
+                    <span className="block text-[11px]" style={{ color: C.muted }}>anexado no {d.origem}{d.aviso ? ` · ${d.aviso}` : ""}{d === principal ? " · documento principal" : ""}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
         </div>
 
-        <div className="mb-3">
-          <span className={rotulo} style={{ color: C.muted }}>Tipo de solicitação</span>
-          <div className="mt-1 space-y-1">
-            {GOSERVICE_TIPOS.map(([v, l]) => (
-              <label key={v} className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: C.text }}>
-                <input type="radio" name="gs-tipo" checked={tipo === v} onChange={() => setTipo(v)} style={{ accentColor: C.coral }} />{l}
-              </label>
-            ))}
-          </div>
-        </div>
         <div className="grid sm:grid-cols-2 gap-3 mb-3">
           <div>
-            <label className={rotulo} style={{ color: C.muted }}>Empresa gocase{emp ? " (pela regra de IE/Gift)" : ""}</label>
-            <select value={empresa} onChange={e => trocarEmpresa(e.target.value)} className={entrada} style={{ borderColor: C.line }}>
-              <option value="bb">BB Indústria</option><option value="go">Go Comércio</option>
+            <label className={rotulo} style={{ color: C.muted }}>Tipo de solicitação</label>
+            <select value={tipo} onChange={e => setTipo(e.target.value)} className={entrada} style={{ borderColor: C.line }}>
+              {GOSERVICE_TIPOS.map(([v, l]) => <option key={v} value={v}>{l.replace("Análise de contrato/documento ", "Análise ")}</option>)}
             </select>
+          </div>
+          <div>
+            <label className={rotulo} style={{ color: C.muted }}>Objeto do contrato{principal ? ` (pelo ${CLASSE_DOC[principal.classe].rotulo})` : ""}</label>
+            <select value={objeto} onChange={e => setObjeto(e.target.value)} className={entrada} style={{ borderColor: C.line }}>
+              {GOSERVICE_OBJETOS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={rotulo} style={{ color: C.muted }}>Empresa gocase{emp ? " (da solicitação)" : ""}</label>
+            {emp ? <div className="mt-1 rounded-xl border px-3 py-2 text-sm" style={{ borderColor: C.line, color: C.text, background: C.bg }}>{EMPRESA_NOME[emp]}</div>
+              : <select value={empresa} onChange={e => trocarEmpresa(e.target.value)} className={entrada} style={{ borderColor: C.line }}>
+                <option value="bb">BB Indústria</option><option value="go">Go Comércio</option>
+              </select>}
           </div>
           <div>
             <label className={rotulo} style={{ color: C.muted }}>Filial (CNPJ)</label>
@@ -3476,28 +3616,29 @@ function ChamadoJuridicoGoService({ r, currentUser, onClose, onPreparado, toast 
             <input value={especifiqueValor} onChange={e => setEspecifiqueValor(e.target.value)} placeholder="R$ 15.000,00 por mês" className={entrada} style={{ borderColor: C.line }} />
           </div>
         </div>
+        {!analisando && (
+          <p className="text-[11px] -mt-1 mb-3" style={{ color: C.muted }}>
+            {analise && analise.valor ? `Valor encontrado: ${fmtReais(analise.valor.v)} (${analise.valor.fonte}) — confira a faixa.` : "Nenhum valor em R$ encontrado no chamado — informe na abertura."}
+          </p>
+        )}
         <div className="mb-3">
           <label className={rotulo} style={{ color: C.muted }}>Especifique o objeto</label>
           <input value={especifiqueObjeto} onChange={e => setEspecifiqueObjeto(e.target.value)} className={entrada} style={{ borderColor: C.line }} />
         </div>
         <div className="mb-3">
           <label className={rotulo} style={{ color: C.muted }}>Observações (vão no chamado)</label>
-          <textarea value={obs} onChange={e => setObs(e.target.value)} rows={8} className={entrada} style={{ borderColor: C.line }} />
+          <textarea value={obs} onChange={e => setObs(e.target.value)} rows={7} className={entrada} style={{ borderColor: C.line }} />
         </div>
-        <div className="mb-2">
-          <span className={rotulo} style={{ color: C.muted }}>Anexos do solicitante</span>
-          {anexos.length === 0 ? <p className="text-xs mt-1" style={{ color: C.muted }}>Nenhum anexo nesta solicitação — anexe as tratativas direto no formulário do GoService.</p>
-            : <div className="mt-1 space-y-1">{anexos.map((a, i) => (
-              <label key={i} className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: C.text }}>
-                <input type="checkbox" checked={marcados.includes(i)} onChange={e => setMarcados(m => e.target.checked ? [...m, i] : m.filter(x => x !== i))} style={{ accentColor: C.coral }} />
-                <Paperclip size={13} style={{ color: C.muted }} />{a.name || "anexo"}
-              </label>
-            ))}</div>}
+        <div className="rounded-xl p-3 text-xs grid sm:grid-cols-2 gap-x-4 gap-y-1" style={{ background: C.bg, color: C.muted }}>
+          <span>E-mail: <b style={{ color: C.text }}>{currentUser?.email || "—"}</b></span>
+          <span>Área: <b style={{ color: C.text }}>{GOSERVICE_FIXOS.area}</b></span>
+          <span>Gestor: <b style={{ color: C.text }}>{GOSERVICE_FIXOS.gestor}</b></span>
+          <span>Aditivo: <b style={{ color: C.text }}>Não</b></span>
         </div>
         {erro && <div className="text-xs font-semibold mt-3" style={{ color: C.danger }}>{erro}</div>}
         <div className="flex gap-2 mt-5">
-          <button onClick={abrir} disabled={enviando} className="flex-1 rounded-xl py-2.5 text-sm font-bold text-white inline-flex items-center justify-center gap-2" style={{ background: "#7B5EA7", opacity: enviando ? .7 : 1 }}>
-            {enviando ? <Loader2 size={15} className="animate-spin" /> : <ExternalLink size={15} />}Abrir GoService preenchido
+          <button onClick={abrir} disabled={enviando || analisando} className="flex-1 rounded-xl py-2.5 text-sm font-bold text-white inline-flex items-center justify-center gap-2" style={{ background: "#7B5EA7", opacity: enviando || analisando ? .7 : 1 }}>
+            {enviando || analisando ? <Loader2 size={15} className="animate-spin" /> : <ExternalLink size={15} />}Abrir GoService preenchido
           </button>
           <button onClick={onClose} className="rounded-xl px-4 py-2.5 text-sm font-bold border" style={{ borderColor: C.line, color: C.muted }}>Agora não</button>
         </div>
