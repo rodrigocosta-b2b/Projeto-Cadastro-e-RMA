@@ -987,13 +987,13 @@ function PublicShell({ view, setView, themePref, onCycleTheme, children }) {
         <div onClick={() => setView("form")} className="flex items-center gap-2 cursor-pointer shrink-0">
           <LogoMarca size={30} />
           <span className="text-xl font-extrabold lowercase tracking-tight">gocase</span>
-          <span className="text-xs opacity-80 hidden sm:inline whitespace-nowrap">Cadastro de Fornecedores</span>
+          <span className="text-xs opacity-80 hidden lg:inline whitespace-nowrap">Cadastro de Fornecedores</span>
         </div>
         <nav className="flex-1 flex items-center gap-1 min-w-0 overflow-x-auto">
           {tabs.map(([id, label, Icon]) => (
             <button key={id} onClick={() => setView(id)} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold whitespace-nowrap transition"
               style={view === id ? { background: "rgba(255,255,255,.2)" } : { opacity: .85 }}>
-              <Icon size={14} /><span className="hidden sm:inline">{label}</span>
+              <Icon size={14} /><span className="hidden md:inline">{label}</span>
             </button>
           ))}
         </nav>
