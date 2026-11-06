@@ -3422,31 +3422,79 @@ function docsDoSolicitante(r) {
     ...(r.chat || []).filter(m => m.role === "cliente" && !m.excluida).flatMap(m => (m.arquivos || []).map(a => ({ ...a, origem: "chat" })))];
   return lista.filter(a => a && a.url && !vistos.has(a.url) && vistos.add(a.url));
 }
-async function analisarDocsJuridico(r) {
+// Baixa um arquivo da plataforma e lê o texto se for PDF.
+async function lerDocumento(a) {
+  let blob = null, texto = "", aviso = "";
+  try {
+    const resp = await fetch(a.url, { credentials: "same-origin" });
+    if (resp.ok) blob = await resp.blob(); else aviso = "não foi possível baixar";
+  } catch (e) { aviso = "não foi possível baixar"; }
+  const ehPdf = /pdf/i.test(a.type || (blob && blob.type) || "") || /\.pdf$/i.test(a.name || "");
+  if (blob && ehPdf) {
+    try { texto = await textoDoPdf(blob); if (!texto.trim()) aviso = "PDF sem texto (digitalizado) — classificado pelo nome"; }
+    catch (e) { aviso = "não foi possível ler o PDF — classificado pelo nome"; }
+  }
+  return { blob, texto, aviso };
+}
+async function hashDoBlob(blob) {
+  const h = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+  return Array.from(new Uint8Array(h), b => b.toString(16).padStart(2, "0")).join("");
+}
+// Semelhança entre dois textos pelas palavras (Jaccard): a minuta padrão devolvida pelo
+// cliente preenchida muda nomes e valores, mas mantém quase todo o texto.
+function semelhancaTexto(a, b) {
+  const palavras = (t) => new Set(semAcento(t).split(/[^a-z0-9]+/).filter(x => x.length >= 3));
+  const A = palavras(a), B = palavras(b);
+  if (A.size < 30 || B.size < 30) return 0;
+  let comum = 0;
+  for (const x of A) if (B.has(x)) comum++;
+  return comum / (A.size + B.size - comum);
+}
+const SEMELHANCA_MINUTA = 0.8;
+// Minuta padrão GoGroup = documento do Acervo com "minuta" no nome (ex.: "Minuta padrão — Contrato B2B").
+const ehMinutaPadrao = (d) => /minuta/.test(semAcento(d.documento || d.nome));
+
+/* Lê os documentos do solicitante e decide tipo, objeto e valor. Tipo: o documento principal
+   igual à minuta padrão do Acervo (mesmo arquivo, ou texto 80% igual ou mais) → "minuta modelo
+   GoGroup"; diferente → "minuta da outra parte"; sem documento do cliente → modelo GoGroup. */
+async function analisarDocsJuridico(r, acervo = []) {
+  const minutasAcervo = (acervo || []).filter(ehMinutaPadrao);
+  const minutas = [];
+  for (const d of minutasAcervo) {
+    const arq = acervoPartes(d).arquivo;
+    if (!arq || !arq.url) continue;
+    const lido = await lerDocumento({ url: arq.url, name: arq.name, type: arq.type });
+    if (lido.blob) minutas.push({ nome: d.nome, hash: await hashDoBlob(lido.blob), texto: lido.texto });
+  }
   const docs = [];
   const valores = [];
   for (const a of docsDoSolicitante(r)) {
-    let blob = null, texto = "", aviso = "";
-    try {
-      const resp = await fetch(a.url, { credentials: "same-origin" });
-      if (resp.ok) blob = await resp.blob(); else aviso = "não foi possível baixar";
-    } catch (e) { aviso = "não foi possível baixar"; }
-    const ehPdf = /pdf/i.test(a.type || (blob && blob.type) || "") || /\.pdf$/i.test(a.name || "");
-    if (blob && ehPdf) {
-      try { texto = await textoDoPdf(blob); if (!texto.trim()) aviso = "PDF sem texto (digitalizado) — classificado pelo nome"; }
-      catch (e) { aviso = "não foi possível ler o PDF — classificado pelo nome"; }
-    }
+    const { blob, texto, aviso } = await lerDocumento(a);
     const classe = classificarDocumento(a.name || "", texto);
+    let minuta = null;
+    if (blob && minutas.length) {
+      const hash = await hashDoBlob(blob);
+      const melhor = minutas.map(m => ({ nome: m.nome, semel: m.hash === hash ? 1 : semelhancaTexto(texto, m.texto) }))
+        .reduce((x, y) => (y.semel > x.semel ? y : x));
+      minuta = { ...melhor, igual: melhor.semel >= SEMELHANCA_MINUTA };
+    }
     for (const v of valoresEmReais(texto)) valores.push({ v, fonte: a.name || "anexo" });
-    docs.push({ name: a.name || "anexo", type: a.type || (blob && blob.type) || "", origem: a.origem, blob, classe, aviso });
+    docs.push({ name: a.name || "anexo", type: a.type || (blob && blob.type) || "", origem: a.origem, blob, classe, aviso, minuta });
   }
   for (const [texto, fonte] of [[r.mensagemCadastro, "mensagem do cliente"], [r.listaDocumentos, "lista de documentos"],
     ...(r.chat || []).filter(m => m.role === "cliente" && !m.excluida).map(m => [m.texto, "chat"])]) {
     for (const v of valoresEmReais(texto)) valores.push({ v, fonte });
   }
-  const principal = docs.reduce((m, d) => (!m || CLASSE_DOC[d.classe].prio > CLASSE_DOC[m.classe].prio ? d : m), null);
+  // Empate de prioridade: vale o documento que NÃO é a minuta padrão (o do próprio cliente).
+  const ehMinuta = (d) => !!(d && d.minuta && d.minuta.igual);
+  const principal = docs.reduce((m, d) => {
+    if (!m) return d;
+    const pd = CLASSE_DOC[d.classe].prio, pm = CLASSE_DOC[m.classe].prio;
+    return pd > pm || (pd === pm && ehMinuta(m) && !ehMinuta(d)) ? d : m;
+  }, null);
   const maior = valores.reduce((m, x) => (!m || x.v > m.v ? x : m), null);
-  return { docs, principal, valor: maior };
+  const tipo = !principal || ehMinuta(principal) ? "minuta modelo GoGroup" : "minuta da outra parte";
+  return { docs, principal, valor: maior, tipo, temMinuta: minutasAcervo.length > 0, minutaComArquivo: minutas.length > 0 };
 }
 
 function especifiqueObjetoPadrao(classe, r, emp) {
@@ -3475,7 +3523,7 @@ function observacoesJuridico(r, analise) {
   return linhas.join("\n\n");
 }
 
-function ChamadoJuridicoGoService({ r, currentUser, onClose, onPreparado, toast }) {
+function ChamadoJuridicoGoService({ r, acervo, currentUser, onClose, onPreparado, toast }) {
   const emp = r.empresaGocase === "go" ? "go" : r.empresaGocase === "bb" ? "bb" : "";
   const [analisando, setAnalisando] = useState(true);
   const [analise, setAnalise] = useState(null);
@@ -3496,11 +3544,11 @@ function ChamadoJuridicoGoService({ r, currentUser, onClose, onPreparado, toast 
   // Ao abrir: lê os documentos do solicitante e preenche tipo, objeto e valor.
   useEffect(() => {
     let vivo = true;
-    analisarDocsJuridico(r).then((a) => {
+    analisarDocsJuridico(r, acervo).then((a) => {
       if (!vivo) return;
       setAnalise(a);
       const classe = a.principal ? a.principal.classe : "";
-      setTipo(a.docs.length ? "minuta da outra parte" : "minuta modelo GoGroup");
+      setTipo(a.tipo);
       setObjeto(classe ? CLASSE_DOC[classe].objeto : GOSERVICE_OBJETOS[0][0]);
       setEspecifiqueObjeto(especifiqueObjetoPadrao(classe, r, emp));
       if (a.valor) { setValorFaixa(faixaDoValor(a.valor.v)); setEspecifiqueValor(fmtReais(a.valor.v)); }
@@ -3570,7 +3618,8 @@ function ChamadoJuridicoGoService({ r, currentUser, onClose, onPreparado, toast 
                   <span className="min-w-0">
                     <span className="inline-flex items-center gap-1"><Paperclip size={13} style={{ color: C.muted }} />{d.name}</span>
                     <span className="ml-2 text-[11px] font-semibold rounded-full px-2 py-0.5" style={{ background: d === principal ? "#7B5EA722" : C.line, color: d === principal ? "#7B5EA7" : C.muted }}>{CLASSE_DOC[d.classe].rotulo}</span>
-                    <span className="block text-[11px]" style={{ color: C.muted }}>anexado no {d.origem}{d.aviso ? ` · ${d.aviso}` : ""}{d === principal ? " · documento principal" : ""}</span>
+                    <span className="block text-[11px]" style={{ color: C.muted }}>anexado no {d.origem}{d.aviso ? ` · ${d.aviso}` : ""}{d === principal ? " · documento principal" : ""}
+                      {d.minuta ? (d.minuta.igual ? ` · igual à minuta padrão do Acervo (${Math.round(d.minuta.semel * 100)}%)` : ` · diferente da minuta padrão (${Math.round(d.minuta.semel * 100)}% igual)`) : ""}</span>
                   </span>
                 </label>
               ))}
@@ -3578,6 +3627,14 @@ function ChamadoJuridicoGoService({ r, currentUser, onClose, onPreparado, toast 
           )}
         </div>
 
+        {!analisando && analise && analise.docs.length > 0 && (
+          <p className="text-[11px] -mt-2 mb-3" style={{ color: analise.minutaComArquivo ? C.muted : C.danger }}>
+            {!analise.temMinuta ? "Não há minuta padrão no Acervo para comparar — o tipo ficou \"minuta da outra parte\". Confira."
+              : !analise.minutaComArquivo ? "A minuta padrão do Acervo não tem arquivo (só link) — não dá para comparar; o tipo ficou \"minuta da outra parte\". Confira."
+              : analise.tipo === "minuta modelo GoGroup" ? "O documento principal é a minuta padrão do Acervo → \"minuta modelo GoGroup\"."
+              : "O documento principal é diferente da minuta padrão do Acervo → \"minuta da outra parte\"."}
+          </p>
+        )}
         <div className="grid sm:grid-cols-2 gap-3 mb-3">
           <div>
             <label className={rotulo} style={{ color: C.muted }}>Tipo de solicitação</label>
@@ -4188,7 +4245,7 @@ export default function App() {
         {screen}
       </Shell>
       {modal && <Modal kind={modal} onConfirm={confirmModal} onClose={() => setModal(null)} />}
-      {goserviceId && requests.some(x => x.id === goserviceId) && <ChamadoJuridicoGoService r={requests.find(x => x.id === goserviceId)} currentUser={currentUser} toast={toast} onPreparado={registrarGoService} onClose={() => setGoserviceId(null)} />}
+      {goserviceId && requests.some(x => x.id === goserviceId) && <ChamadoJuridicoGoService r={requests.find(x => x.id === goserviceId)} acervo={acervo} currentUser={currentUser} toast={toast} onPreparado={registrarGoService} onClose={() => setGoserviceId(null)} />}
       <DocViewer />
       <Toast />
     </>
