@@ -20,8 +20,10 @@ recarregar da extensão e dê F5 na plataforma.
 
 1. No portal da equipe, abra o chamado e clique em **Abrir chamado no Jurídico (GoService)**
    (a janela também aparece sozinha ao **Submeter ao Setor Jurídico**).
-2. Escolha o tipo (minuta da outra parte ou modelo GoGroup), a filial (CNPJ) e o valor, revise
-   as observações e os anexos e clique em **Abrir GoService preenchido**.
+2. A janela já vem preenchida a partir do chamado: lê os documentos do cliente e define o
+   objeto (NDA, Código de Conduta ou Contratos com Clientes) e o tipo (minuta da outra parte ou
+   modelo GoGroup), usa a empresa da solicitação (BB ou Go, CNPJ da matriz) e sugere a faixa
+   pelo valor em R$ encontrado. Confira, ajuste se precisar e clique em **Abrir GoService preenchido**.
 3. O GoService abre numa aba nova com tudo preenchido e um aviso no canto. Confira e clique em
    **Enviar**.
 
@@ -38,8 +40,8 @@ preenchimento acontece ao abrir o formulário (o pedido fica guardado por 30 min
 | Razão social da outra parte | razão social do cliente |
 | Empresa do grupo / empresa Gocase | Gocase / BB Indústria ou Go Comércio na filial escolhida |
 | Gestor responsável | igor.morais |
-| Tipo de solicitação | escolhido na janela da plataforma |
-| Objeto do contrato | Contratos com Clientes (B2B, parcerias, distribuição, revenda) |
+| Tipo de solicitação | minuta da outra parte (cliente mandou documento) ou modelo GoGroup |
+| Objeto do contrato | pelo documento principal: NDA, Código de Conduta ou Contratos com Clientes |
 | Especifique objeto / valor | da janela da plataforma |
 | Valor do contrato | faixa escolhida na janela |
 | Anexos | anexos do solicitante marcados na janela |
