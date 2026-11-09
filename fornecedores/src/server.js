@@ -23,7 +23,7 @@
  *   GET    /api/health
  *   GET    /api/public/acervo                   → [{ id, nome, documento, empresa, descricao, envioAutomatico }] (sem links)
  *   POST   /api/public/files  {name,type,size,data(base64)} → { id, name, type, size, url }
- *          (até 10 MB; JPG, PNG, WEBP, MP4, MOV, PDF, CSV ou XLSX — validado pela extensão)
+ *          (até 10 MB; qualquer documento, exceto programas, scripts e páginas web — pela extensão)
  *   POST   /api/public/cadastro {cnpj, emailSolicitante, dados…} → { id, abertura, prazo, entregues:[doc] }
  *   GET    /api/public/status?email=&cnpj=&id=  → { resultados: [{ id, status, abertura, prazo, ultimaAtualiz, entregues?, acesso? }] }
  *          Basta um dos três (e-mail do solicitante, CNPJ ou protocolo): cada solicitação vem com os
@@ -69,29 +69,40 @@ const SEED_ADMINS = [
   { email: "rodrigo.costa@gocase.com", name: "Rodrigo Costa", role: "ADMIN" },
   { email: "larissa.simoes@gocase.com", name: "Larissa Simões", role: "ADMIN" },
 ];
-/* Formatos aceitos no formulário público, pela EXTENSÃO do arquivo. Para cada uma: o tipo
- * gravado (canônico) e os tipos que o navegador pode informar — no Windows um .csv
- * costuma chegar como "application/vnd.ms-excel" (associação com o Excel) ou sem tipo. */
+/* Anexos do formulário público: qualquer documento, decidido pela EXTENSÃO do arquivo.
+ * Só programas executáveis, scripts e páginas web são recusados. O tipo gravado é o canônico
+ * da extensão (o que o navegador informa não vale: no Windows um .csv chega como
+ * "application/vnd.ms-excel" ou sem tipo); extensão desconhecida vira octet-stream. */
 const XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-const PUBLIC_FILE_EXT = {
-  jpg: ["image/jpeg", ["image/jpeg", "image/pjpeg"]],
-  jpeg: ["image/jpeg", ["image/jpeg", "image/pjpeg"]],
-  png: ["image/png", ["image/png"]],
-  webp: ["image/webp", ["image/webp"]],
-  mp4: ["video/mp4", ["video/mp4"]],
-  mov: ["video/quicktime", ["video/quicktime"]],
-  pdf: ["application/pdf", ["application/pdf"]],
-  csv: ["text/csv", ["text/csv", "application/csv", "text/plain", "application/vnd.ms-excel", "text/x-csv", "application/octet-stream"]],
-  xlsx: [XLSX_TYPE, [XLSX_TYPE, "application/octet-stream", "application/zip"]],
+const TIPO_POR_EXTENSAO = {
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif",
+  heic: "image/heic", heif: "image/heif", tif: "image/tiff", tiff: "image/tiff", bmp: "image/bmp",
+  mp4: "video/mp4", mov: "video/quicktime",
+  pdf: "application/pdf", txt: "text/plain", csv: "text/csv", rtf: "application/rtf",
+  doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel", xlsx: XLSX_TYPE,
+  ppt: "application/vnd.ms-powerpoint", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  odt: "application/vnd.oasis.opendocument.text", ods: "application/vnd.oasis.opendocument.spreadsheet",
+  odp: "application/vnd.oasis.opendocument.presentation",
+  zip: "application/zip", rar: "application/vnd.rar", "7z": "application/x-7z-compressed",
+  xml: "application/xml", ofx: "application/x-ofx", eml: "message/rfc822", msg: "application/vnd.ms-outlook",
 };
-// Tipo canônico do arquivo enviado pelo público, ou "" se o formato não é aceito.
-function tipoArquivoPublico(name, type) {
+const EXTENSOES_BLOQUEADAS = new Set([
+  "exe", "msi", "msp", "bat", "cmd", "com", "scr", "pif", "cpl", "dll", "sys", "drv", "ocx", "lnk", "reg", "inf",
+  "ps1", "psm1", "vbs", "vbe", "js", "mjs", "jse", "wsf", "wsh", "hta", "jar", "sh", "bash", "apk", "app", "dmg", "deb", "rpm",
+  "html", "htm", "xhtml", "shtml", "svg", "svgz", "php", "asp", "aspx", "jsp",
+]);
+// Tipo canônico do arquivo enviado pelo público, ou "" se a extensão é bloqueada.
+function tipoArquivoPublico(name) {
   const ext = (String(name || "").toLowerCase().match(/\.([a-z0-9]+)$/) || [])[1] || "";
-  const regra = PUBLIC_FILE_EXT[ext];
-  if (!regra) return "";
-  const t = String(type || "").toLowerCase().split(";")[0].trim();
-  return !t || regra[1].includes(t) ? regra[0] : "";
+  if (EXTENSOES_BLOQUEADAS.has(ext)) return "";
+  return TIPO_POR_EXTENSAO[ext] || "application/octet-stream";
 }
+// Tipos que o navegador pode abrir direto (visualizador do portal); o resto sempre vai como
+// download — um arquivo enviado nunca roda como página no domínio da plataforma.
+const TIPOS_INLINE = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "video/mp4", "video/quicktime", "application/pdf"]);
+// Tipos que o navegador executaria (página, SVG, XML, script): nunca saem com o tipo original.
+const TIPO_ATIVO = /^(text\/html|application\/xhtml\+xml|image\/svg\+xml|(text|application)\/(xml|javascript|ecmascript|x-javascript))$/;
 const PUBLIC_FILE_MAX = 10 * 1024 * 1024; // 10 MB por arquivo
 const LOGIN_MAX_FAILS = 8;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
@@ -438,11 +449,14 @@ async function fileResponse(env, id, download) {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   const name = (meta.rows[0].name || "arquivo").replace(/[^\w.\-]+/g, "_").slice(0, 120);
+  const tipo = String(meta.rows[0].type || "").toLowerCase().split(";")[0].trim();
+  const inline = !download && TIPOS_INLINE.has(tipo);
   return new Response(bytes, {
     status: 200,
     headers: {
-      "content-type": meta.rows[0].type || "application/octet-stream",
-      "content-disposition": `${download ? "attachment" : "inline"}; filename="${name}"`,
+      "content-type": inline ? tipo : (tipo && !TIPO_ATIVO.test(tipo) ? tipo : "application/octet-stream"),
+      "content-disposition": `${inline ? "inline" : "attachment"}; filename="${name}"`,
+      "x-content-type-options": "nosniff",
       "content-length": String(bytes.length),
       "cache-control": "private, max-age=3600",
     },
@@ -905,7 +919,7 @@ export default {
       if (path === "/api/public/files" && method === "POST") {
         const body = (await request.json().catch(() => null)) || null;
         if (!body || typeof body.data !== "string") return json({ error: "invalid_body" }, 400);
-        const tipo = tipoArquivoPublico(body.name, body.type);
+        const tipo = tipoArquivoPublico(body.name);
         if (!tipo) return json({ error: "file_type" }, 415);
         if (body.data.length > Math.ceil(PUBLIC_FILE_MAX / 3) * 4 + 4) return json({ error: "file_too_large" }, 413);
         const arquivo = { ...body, type: tipo }; // grava o tipo canônico (ex.: .csv sempre text/csv)

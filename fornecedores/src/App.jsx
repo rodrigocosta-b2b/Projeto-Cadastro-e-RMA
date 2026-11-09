@@ -323,10 +323,13 @@ const readAsDataURL = (file) => new Promise((res, rej) => {
   r.readAsDataURL(file);
 });
 const PUBLIC_FILE_MAX = 10 * 1024 * 1024; // igual ao limite do worker
-// Formatos do formulário público — mesma lista de PUBLIC_FILE_EXT no worker (validação pela extensão).
-const PUBLIC_FILE_EXT = ["jpg", "jpeg", "png", "webp", "mp4", "mov", "pdf", "csv", "xlsx"];
-const PUBLIC_FILE_FORMATOS = "JPG, PNG, WEBP, MP4, MOV, PDF, CSV ou XLSX";
-const PUBLIC_FILE_ACCEPT = "image/jpeg,image/png,image/webp,video/mp4,video/quicktime,application/pdf,.csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+// Anexos do formulário público: qualquer documento, menos programas executáveis, scripts e
+// páginas web — mesma lista de EXTENSOES_BLOQUEADAS no worker (validação pela extensão).
+const PUBLIC_FILE_BLOQUEADAS = ["exe", "msi", "msp", "bat", "cmd", "com", "scr", "pif", "cpl", "dll", "sys", "drv", "ocx", "lnk", "reg", "inf",
+  "ps1", "psm1", "vbs", "vbe", "js", "mjs", "jse", "wsf", "wsh", "hta", "jar", "sh", "bash", "apk", "app", "dmg", "deb", "rpm",
+  "html", "htm", "xhtml", "shtml", "svg", "svgz", "php", "asp", "aspx", "jsp"];
+const PUBLIC_FILE_FORMATOS = "qualquer documento (Word, Excel, PDF, imagens, planilhas, ZIP…), exceto programas e scripts";
+const PUBLIC_FILE_ACCEPT = "";
 
 // ---- fallback local (dev/preview) ----
 const _ls = {
@@ -528,7 +531,7 @@ const db = {
   // `preview` é uma URL local só para a miniatura (o visitante não lê /api/files).
   async uploadPublicFile(file) {
     const ext = (String(file.name || "").toLowerCase().match(/\.([a-z0-9]+)$/) || [])[1] || "";
-    if (!PUBLIC_FILE_EXT.includes(ext)) throw new Error(`"${file.name}": formato não aceito. Use ${PUBLIC_FILE_FORMATOS}.`);
+    if (PUBLIC_FILE_BLOQUEADAS.includes(ext)) throw new Error(`"${file.name}": programas e scripts não são aceitos. Envie documentos, imagens ou planilhas.`);
     if (file.size > PUBLIC_FILE_MAX) throw new Error(`"${file.name}" passa de 10 MB.`);
     const dataUrl = await readAsDataURL(file);
     const preview = (file.type || "").match(/^(image|video)\//) ? URL.createObjectURL(file) : "";
@@ -538,7 +541,7 @@ const db = {
         .catch(() => null);
       // O servidor devolve o tipo canônico (ex.: .csv vira text/csv mesmo se o Windows disser "vnd.ms-excel").
       if (r && r.ok) { const j = await r.json(); return { id: j.id, name: file.name, type: j.type || file.type || "", size: file.size, url: j.url, preview }; }
-      if (r && r.status === 415) throw new Error(`"${file.name}": formato não aceito. Use ${PUBLIC_FILE_FORMATOS}.`);
+      if (r && r.status === 415) throw new Error(`"${file.name}": programas e scripts não são aceitos. Envie documentos, imagens ou planilhas.`);
       if (r && r.status === 413) throw new Error(`"${file.name}" passa de 10 MB.`);
       throw new Error(`Não foi possível enviar "${file.name}". Tente novamente.`);
     }
@@ -1639,7 +1642,7 @@ function ChatPanel({ r, currentUser, onSendMsg, onReopenRequest, fornecedor = fa
         {arquivos.length > 0 && <div className="flex gap-2 mb-2 flex-wrap">{arquivos.map((f, i) => <div key={i} className="flex items-center gap-1 text-xs rounded-lg px-2 py-1" style={{ background: C.coralSoft, color: C.coral }}><Paperclip size={11} />{f.name}<button onClick={() => setArquivos(a => a.filter((_, j) => j !== i))}><X size={11} /></button></div>)}</div>}
         <div className="flex gap-2 items-end">
           <textarea value={texto} onChange={e => setTexto(e.target.value)} onKeyDown={handleKey} maxLength={4000} placeholder={isClosed && !isInternal ? "Envie uma mensagem para reabrir o chamado…" : "Escreva uma mensagem… (Enter para enviar)"} rows={2} className="flex-1 min-w-0 rounded-xl border px-3 py-2 text-sm resize-none bg-white" style={{ borderColor: C.line }} />
-          <label className="cursor-pointer rounded-xl p-2.5 hover:bg-gray-50 shrink-0" title={fornecedor ? `Anexar arquivo (${PUBLIC_FILE_FORMATOS}, até 10 MB)` : "Anexar arquivo"}>
+          <label className="cursor-pointer rounded-xl p-2.5 hover:bg-gray-50 shrink-0" title={fornecedor ? "Anexar documento (até 10 MB; programas e scripts não são aceitos)" : "Anexar arquivo"}>
             <input type="file" className="hidden" multiple accept={fornecedor ? PUBLIC_FILE_ACCEPT : undefined} onChange={anexar} />
             {subindo ? <Loader2 size={18} className="animate-spin" style={{ color: C.coral }} /> : <Paperclip size={18} style={{ color: C.muted }} />}
           </label>
@@ -2172,7 +2175,7 @@ function ExtNovaCad({ toast, acervo, goStatus }) {
 
             <div className="text-xs font-semibold mb-2 flex items-center gap-1" style={{ color: C.text }}><Send size={13} /> Enviar meus documentos</div>
             <FileUpload key={uploadKey} initial={meusDocs} onFiles={setMeusDocs} upload={(file) => db.uploadPublicFile(file)} accept={PUBLIC_FILE_ACCEPT}
-              hint="Clique ou arraste para adicionar — imagens (JPG, PNG, WEBP), vídeos (MP4, MOV), PDF e planilhas (CSV, XLSX), até 10 MB cada" />
+              hint="Clique ou arraste para adicionar — qualquer documento (Word, Excel, PDF, imagens, planilhas, ZIP…), até 10 MB cada" />
 
             <div className="text-xs font-semibold mt-5 mb-2 flex items-center gap-1" style={{ color: C.text }}><Download size={13} /> Solicitar da gocase</div>
             {docsDisponiveis.length === 0 ? (
