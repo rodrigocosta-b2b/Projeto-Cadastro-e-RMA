@@ -69,17 +69,21 @@ try {
   if (typeof document !== "undefined") document.documentElement.setAttribute("data-theme", _res);
 } catch (e) { }
 
+// Status do chamado (na ordem das colunas do quadro). Aprovada/Negada saíram: os chamados
+// antigos viraram Concluída (o worker migra uma vez) e só aparecem no histórico (STATUS_HIST).
+// Recadastro abre um novo ciclo de análise, com prazo novo (ver confirmModal).
 const STATUS = {
   NOVA:          { label: "Nova",                        color: C.cyan   },
-  EM_ANALISE:    { label: "Em Análise",                  color: C.violet },
-  AGUARDANDO:    { label: "Aguardando Informações",       color: C.yellow },
+  EM_ANALISE:    { label: "Em análise",                  color: C.violet },
+  AGUARDANDO:    { label: "Aguardando devolutiva",       color: C.yellow },
   JURIDICO:      { label: "Submetido ao Jurídico",        color: "#7B5EA7" },
   FISCAL:        { label: "Submetido ao Fiscal",          color: "#0077B6" },
   FINANCEIRO:    { label: "Submetido ao Financeiro",      color: "#008B8B" },
-  APROVADA:      { label: "Aprovada",                    color: C.green  },
-  NEGADA:        { label: "Negada",                      color: C.danger },
   CONCLUIDA:     { label: "Concluída",                   color: "#8A8A99"},
+  RECADASTRO:    { label: "Recadastro",                  color: "#F08C2E" },
 };
+// Para exibir status de movimentações antigas (linha do tempo, relatórios).
+const STATUS_HIST = { ...STATUS, APROVADA: { label: "Aprovada", color: C.green }, NEGADA: { label: "Negada", color: C.danger } };
 const SLA = {
   DENTRO: { label: "Dentro do SLA", color: C.green },
   PROXIMO: { label: "Próximo do venc.", color: C.yellow },
@@ -271,9 +275,8 @@ const DEFAULT_ACERVO = [
 const DEFAULT_TEMPLATES = {
   EM_ANALISE: "Olá {cliente}, recebemos sua solicitação {id} e ela está EM ANÁLISE pela nossa equipe. Em breve retornaremos com uma definição.",
   AGUARDANDO: "Olá {cliente}, para dar andamento à sua solicitação {id} precisamos de informações ou documentos complementares. Por favor, responda este contato com os dados solicitados.",
-  APROVADA: "Olá {cliente}, boa notícia! Sua solicitação {id} foi APROVADA. Em seguida você receberá os próximos passos para conclusão.",
-  NEGADA: "Olá {cliente}, após análise, sua solicitação {id} foi NEGADA. Se tiver dúvidas sobre o motivo, responda este contato que nossa equipe de cadastro irá ajudar.",
   CONCLUIDA: "Olá {cliente}, sua solicitação {id} foi CONCLUÍDA. Obrigado por contar com a gocase!",
+  RECADASTRO: "Olá {cliente}, abrimos o RECADASTRO da sua solicitação {id}. Nossa equipe vai analisar as informações atualizadas e retorna em breve.",
 };
 function renderTemplate(tpl, { id, cliente, status }) {
   return (tpl || "").replace(/\{id\}/g, id || "").replace(/\{cliente\}/g, cliente || "cliente").replace(/\{status\}/g, status || "");
@@ -1059,7 +1062,7 @@ function ConsultaStatus() {
       </Card>
       {res && res.length > 1 && <p className="text-xs mb-2" style={{ color: C.muted }}>{res.length} solicitações encontradas.</p>}
       {res && res.map(item => {
-        const st = STATUS[item.status] || STATUS.NOVA;
+        const st = STATUS_HIST[item.status] || STATUS.NOVA;
         return (
           <div key={item.id} className="mb-4">
             <Card className="p-5">
@@ -1111,7 +1114,7 @@ function ChamadoFornecedor({ acesso, onVoltar }) {
         : <div className="flex items-center gap-2 text-sm" style={{ color: C.muted }}><Loader2 size={16} className="animate-spin" /> Abrindo chamado…</div>}
     </div>
   );
-  const st = STATUS[ch.status] || STATUS.NOVA;
+  const st = STATUS_HIST[ch.status] || STATUS.NOVA;
   return (
     <div>
       <button onClick={onVoltar} className="flex items-center gap-1 text-sm mb-3" style={{ color: C.muted }}><ArrowLeft size={15} /> Voltar para a consulta</button>
@@ -1221,7 +1224,7 @@ function Shell({ portal, view, nav, onLogout, notifOpen, setNotifOpen, user, not
                   <span className="rounded-lg p-1.5 shrink-0" style={{ background: C.coralSoft, color: C.coral }}><FileText size={14} /></span>
                   <div className="min-w-0 flex-1">
                     <div className="text-sm font-semibold truncate" style={{ color: C.text }}>{r.id} · {r.parceiro}</div>
-                    <div className="text-xs truncate" style={{ color: C.muted }}>{r.cnpj} — {STATUS[r.status]?.label || r.status}</div>
+                    <div className="text-xs truncate" style={{ color: C.muted }}>{r.cnpj} — {STATUS_HIST[r.status]?.label || r.status}</div>
                   </div>
                 </button>
               ))}
@@ -1309,8 +1312,8 @@ function fmtDuration(ms) {
   const d = Math.floor(h / 24);
   return `${d}d ${h % 24}h`;
 }
-// Status em que o prazo deixa de correr: a decisão da equipe (aprovar ou negar) cumpre o SLA;
-// Concluída vem depois e não reabre a contagem.
+// Status em que o prazo deixa de correr: Concluída (Aprovada/Negada ficam para os movimentos
+// antigos — chamado aprovado no dia 3 e concluído no dia 9 continua no prazo).
 const SLA_PARADO = ["APROVADA", "NEGADA", "CONCLUIDA"];
 // Momento em que o SLA parou: início da sequência atual de status parados nas movimentações
 // (Aprovada em 29/10 e Concluída em 05/11 → 29/10). Voltar para análise (ex.: reabertura) volta
@@ -1332,9 +1335,10 @@ function calcSLAMetrics(r) {
   const paradaTs = paradaSLA(r);
   const tempoAberto = finalizadoTs ? finalizadoTs - aberturaTs : now - aberturaTs;
   const tempoAtendimento = finalizadoTs ? finalizadoTs - aberturaTs : null;
-  const slaTotal = prazoTs && aberturaTs ? prazoTs - aberturaTs : 7 * 24 * 3600000;
+  const inicioSLA = r.cicloTs || aberturaTs; // recadastro recomeça o ciclo
+  const slaTotal = prazoTs && inicioSLA ? prazoTs - inicioSLA : 7 * 24 * 3600000;
   const slaRestante = prazoTs && !paradaTs ? prazoTs - now : null;
-  const slaPct = slaTotal > 0 ? Math.min(100, Math.round((((paradaTs || now) - aberturaTs) / slaTotal) * 100)) : 0;
+  const slaPct = slaTotal > 0 ? Math.min(100, Math.round((((paradaTs || now) - inicioSLA) / slaTotal) * 100)) : 0;
   // Calculado na hora (o campo `sla` gravado na abertura nunca era atualizado): com decisão,
   // compara a data da decisão com o prazo; sem decisão, o momento atual.
   let slaStatus = r.sla || "DENTRO";
@@ -1742,7 +1746,7 @@ function DocEnvioItem({ d, acervo, interno, onLiberar, onCancelar }) {
 }
 
 /* ===================== Detalhe ===================== */
-function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopenRequest, onEditMsg, onDeleteMsg, acervo, onLiberarDoc, onCancelarEnvio, toast, onAbrirGoService }) {
+function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopenRequest, onEditMsg, onDeleteMsg, acervo, onLiberarDoc, onCancelarEnvio, toast, onAbrirGoService, onMudarStatus }) {
   if (!r) return null;
   const tl = buildTimeline(r);
   return (
@@ -1750,7 +1754,7 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
       <button onClick={back} className="flex items-center gap-1 text-sm mb-3" style={{ color: C.muted }}><ArrowLeft size={15} /> Voltar</button>
       <div className="flex items-center gap-3 mb-1 flex-wrap">
         <h1 className="text-2xl font-bold font-mono" style={{ color: C.text }}>{r.id}</h1>
-        <Pill {...STATUS[r.status]} />{slaSelo(r) && <Pill {...slaSelo(r)} />}
+        <Pill {...(STATUS_HIST[r.status] || STATUS.NOVA)} />{slaSelo(r) && <Pill {...slaSelo(r)} />}
       </div>
       <p className="text-sm mb-4" style={{ color: C.muted }}>{r.tipo} · Aberta em {r.abertura} · Prazo SLA {r.prazo} · Responsável {r.resp}</p>
       <SLAPanel r={r} />
@@ -1857,16 +1861,21 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
               )}
             </Card>
           )}
-          {interno && !["CONCLUIDA", "NEGADA"].includes(r.status) && (
+          {interno && (
             <div className="space-y-3">
-              {/* Ações gerais */}
-              <div className="flex gap-3 flex-wrap">
-                <Btn icon={CheckCircle2} color={C.green}  onClick={() => openModal("aprovar")}>Aprovar</Btn>
-                <Btn icon={XCircle}     color={C.danger}   onClick={() => openModal("negar")}>Negar</Btn>
-                {r.status === "APROVADA" && <Btn icon={Check} color={C.violet} onClick={() => openModal("concluir")}>Concluir</Btn>}
-              </div>
-              {/* Submissão setorial — apenas para solicitações de Cadastro */}
-              {r.tipo === "Cadastro" && (
+              {/* Mudar status: os mesmos status do quadro; os que pedem informação abrem a janela */}
+              {onMudarStatus && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <label htmlFor={`status-${r.id}`} className="text-xs font-semibold" style={{ color: C.muted }}>Mudar status:</label>
+                  <select id={`status-${r.id}`} value="" onChange={e => { if (e.target.value) onMudarStatus(r.id, e.target.value); }}
+                    className="rounded-xl border px-3 py-2 text-sm bg-white" style={{ borderColor: C.line, color: C.text }}>
+                    <option value="">Selecione o novo status…</option>
+                    {Object.entries(STATUS).filter(([k]) => k !== r.status).map(([k, st]) => <option key={k} value={k}>{st.label}</option>)}
+                  </select>
+                </div>
+              )}
+              {/* Submissão setorial — apenas para solicitações de Cadastro em andamento */}
+              {r.tipo === "Cadastro" && r.status !== "CONCLUIDA" && (
                 <div>
                   <div className="text-xs font-semibold mb-2" style={{ color: C.muted }}>Submeter para análise setorial:</div>
                   <div className="flex gap-2 flex-wrap">
@@ -1892,7 +1901,7 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
             <div className="absolute left-2 top-1 bottom-1 w-px" style={{ background: C.line }} />
             {tl.map((t, i) => {
               const dot = t.actor === "ia" ? C.violet : t.actor === "cliente" ? C.cyan : C.coral;
-              const stDef = STATUS[t.status] || STATUS.NOVA;
+              const stDef = STATUS_HIST[t.status] || STATUS.NOVA;
               return (
                 <div key={i} className="relative mb-5">
                   <span className="absolute -left-[18px] top-1 w-3 h-3 rounded-full border-2 border-white" style={{ background: dot }} />
@@ -2354,12 +2363,10 @@ function calcMetrics(reqs) {
   const total = reqs.length;
   const abertos    = reqs.filter(r => !["CONCLUIDA","NEGADA"].includes(r.status)).length;
   const finalizados= reqs.filter(r =>  ["CONCLUIDA","NEGADA"].includes(r.status)).length;
-  const aprovados  = reqs.filter(r => r.status === "APROVADA" || r.status === "CONCLUIDA").length;
-  const negados    = reqs.filter(r => r.status === "NEGADA").length;
+  const recadastros= reqs.filter(r => (r.movimentos || []).some(m => m.status === "RECADASTRO") || r.status === "RECADASTRO").length;
   const dentroPrazo= reqs.filter(r => ["DENTRO", "PROXIMO"].includes(slaDe(r))).length;
   const foraPrazo  = reqs.filter(r => slaDe(r) === "VENCIDO").length;
   const taxaSLA    = total > 0 ? Math.round((dentroPrazo / total) * 100) : 0;
-  const taxaAprov  = (aprovados + negados) > 0 ? Math.round((aprovados / (aprovados + negados)) * 100) : 0;
   const temposAtend= reqs.filter(r => r.finalizadoTs && r.aberturaTs).map(r => r.finalizadoTs - r.aberturaTs);
   const tMedioAtend= temposAtend.length > 0 ? temposAtend.reduce((a,b)=>a+b,0)/temposAtend.length : null;
   const temposResp = reqs.filter(r => r.atribTs && r.aberturaTs).map(r => r.atribTs - r.aberturaTs);
@@ -2373,12 +2380,12 @@ function calcMetrics(reqs) {
   const apMes = {};
   reqs.forEach(r => {
     const p=(r.abertura||"").split("/");
-    if (p.length===3){const k=`${p[1]}/${p[2].slice(-2)}`;if(!apMes[k])apMes[k]={m:k,ap:0,ng:0};if(["APROVADA","CONCLUIDA"].includes(r.status))apMes[k].ap++;if(r.status==="NEGADA")apMes[k].ng++;}
+    if (p.length===3){const k=`${p[1]}/${p[2].slice(-2)}`;if(!apMes[k])apMes[k]={m:k,ap:0,ng:0};if(r.status==="CONCLUIDA")apMes[k].ap++;if(r.status==="RECADASTRO"||(r.movimentos||[]).some(x=>x.status==="RECADASTRO"))apMes[k].ng++;}
   });
   const apMesDados = Object.values(apMes).sort((a,b)=>a.m.localeCompare(b.m)).slice(-4);
   const byResp = {};
   reqs.forEach(r=>{const k=!r.resp||r.resp==="—"?"Não atribuído":r.resp==="IA"?"IA":r.resp;byResp[k]=(byResp[k]||0)+1;});
-  return { total, abertos, finalizados, aprovados, negados, dentroPrazo, foraPrazo, taxaSLA, taxaAprov, tMedioAtend, tMedioResp, mesDados, apMesDados, byResp };
+  return { total, abertos, finalizados, recadastros, dentroPrazo, foraPrazo, taxaSLA, tMedioAtend, tMedioResp, mesDados, apMesDados, byResp };
 }
 
 function IntDash({ nav, requests }) {
@@ -2399,9 +2406,6 @@ function IntDash({ nav, requests }) {
   }), [requests, reqTipo, period]);
 
   const count    = (s) => base.filter(r => r.status === s).length;
-  const aprov    = count("APROVADA") + count("CONCLUIDA");
-  const neg      = count("NEGADA");
-  const taxaAprov= (aprov + neg) > 0 ? Math.round((aprov/(aprov+neg))*100) : 0;
   const slaOk    = base.filter(r => ["DENTRO", "PROXIMO"].includes(slaDe(r))).length;
   const cumprSla = base.length > 0 ? Math.round((slaOk/base.length)*100) : 0;
   const foraSla  = base.filter(r => slaSelo(r) === SLA.VENCIDO).length; // concluídos ficam só no histórico
@@ -2412,8 +2416,8 @@ function IntDash({ nav, requests }) {
     { name: "Nova",       v: count("NOVA"),       fill: C.cyan   },
     { name: "Em análise", v: count("EM_ANALISE"), fill: C.violet },
     { name: "Aguardando", v: count("AGUARDANDO"), fill: C.yellow },
-    { name: "Aprovada",   v: aprov,               fill: C.green  },
-    { name: "Negada",     v: neg,                 fill: C.coral  },
+    { name: "Setores",    v: count("JURIDICO") + count("FISCAL") + count("FINANCEIRO"), fill: "#7B5EA7" },
+    { name: "Recadastro", v: count("RECADASTRO"), fill: "#F08C2E" },
     { name: "Concluída",  v: count("CONCLUIDA"),  fill: "#8A8A99"},
   ];
 
@@ -2502,8 +2506,8 @@ function IntDash({ nav, requests }) {
           </div>
           <div className="grid sm:grid-cols-4 gap-4 mb-6">
             <StatCard icon={Plus}          label="Novas"             value={count("NOVA")}        color={C.cyan}   onClick={()=>nav(destino)}/>
-            <StatCard icon={AlertTriangle} label="Aguardando"        value={count("AGUARDANDO")}  color={C.yellow} onClick={()=>nav(destino)}/>
-            <StatCard icon={TrendingUp}    label="Taxa aprovação"    value={`${taxaAprov}%`}      color={C.green} />
+            <StatCard icon={AlertTriangle} label="Aguardando devolutiva" value={count("AGUARDANDO")}  color={C.yellow} onClick={()=>nav(destino)}/>
+            <StatCard icon={RefreshCw}     label="Recadastro"        value={count("RECADASTRO")}  color="#F08C2E" onClick={()=>nav(destino)}/>
             <StatCard icon={ShieldCheck}   label="Cumprim. SLA"      value={`${cumprSla}%`}       color={C.cyan}  />
           </div>
           <div className="grid lg:grid-cols-2 gap-5">
@@ -2612,17 +2616,17 @@ function IntDash({ nav, requests }) {
                   </>
               }
             </Card>
-            {/* Aprovações vs negativas */}
+            {/* Concluídas x recadastros por mês de abertura */}
             <Card className="p-5">
-              <h2 className="font-bold mb-4" style={{color:C.text}}>Aprovações vs negativas</h2>
+              <h2 className="font-bold mb-4" style={{color:C.text}}>Concluídas x recadastros</h2>
               {m.apMesDados.length>0
                 ? <ResponsiveContainer width="100%" height={220}>
                     <LineChart data={m.apMesDados}>
                       <CartesianGrid strokeDasharray="3 3" stroke={C.line} vertical={false}/>
                       <XAxis dataKey="m" tick={{fontSize:12,fill:C.muted}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:12,fill:C.muted}} axisLine={false} tickLine={false}/><Tooltip/>
-                      <Line dataKey="ap" stroke={C.green} strokeWidth={3} dot={{fill:C.green,r:4}}  name="Aprovadas"/>
-                      <Line dataKey="ng" stroke={C.coral} strokeWidth={3} dot={{fill:C.coral,r:4}} name="Negadas"/>
+                      <Line dataKey="ap" stroke={C.green} strokeWidth={3} dot={{fill:C.green,r:4}}  name="Concluídas"/>
+                      <Line dataKey="ng" stroke="#F08C2E" strokeWidth={3} dot={{fill:"#F08C2E",r:4}} name="Recadastros"/>
                     </LineChart>
                   </ResponsiveContainer>
                 : <div className="py-8 text-center text-sm" style={{color:C.muted}}>Dados insuficientes.</div>
@@ -2771,7 +2775,7 @@ function IntLista({ nav, requests, tipo, titulo, onMoverStatus }) {
   const [viewMode, setViewMode] = useState("board"); // "board" (cards) | "list"
   const [busca, setBusca] = useState("");
   const base = requests.filter(r => r.tipo === tipo);
-  const rows = (f === "Todos" ? base : base.filter(r => STATUS[r.status].label === f)).filter(r => casaBusca(r, busca));
+  const rows = (f === "Todos" ? base : base.filter(r => STATUS_HIST[r.status]?.label === f)).filter(r => casaBusca(r, busca));
   return (
     <div>
       <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
@@ -2802,7 +2806,7 @@ function IntLista({ nav, requests, tipo, titulo, onMoverStatus }) {
             <td className="px-4 py-3 font-mono font-semibold" style={{ color: C.coral }}>{r.id}</td>
             <td className="px-4 py-3" style={{ color: C.text }}>{r.parceiro}</td>
             <td className="px-4 py-3" style={{ color: C.muted }}>{r.uf}</td>
-            <td className="px-4 py-3"><Pill {...STATUS[r.status]} /></td>
+            <td className="px-4 py-3"><Pill {...(STATUS_HIST[r.status] || STATUS.NOVA)} /></td>
             <td className="px-4 py-3">{slaSelo(r) ? <Pill {...slaSelo(r)} /> : <span style={{ color: C.muted }}>—</span>}</td>
             <td className="px-4 py-3" style={{ color: C.muted }}>{r.resp}</td>
             <td className="px-4 py-3"><ChevronRight size={16} style={{ color: C.muted }} /></td>
@@ -2886,8 +2890,8 @@ function ClienteDetalhe({ nome, requests, users, nav }) {
       <div className="grid sm:grid-cols-4 gap-4 mb-5">
         <StatCard icon={FileText} label="Total" value={reqs.length} color={C.coral} />
         <StatCard icon={Clock} label="Em análise" value={c("EM_ANALISE")} color={C.violet} />
-        <StatCard icon={CheckCircle2} label="Aprovadas" value={c("APROVADA")} color={C.green} />
-        <StatCard icon={XCircle} label="Negadas" value={c("NEGADA")} color={C.danger} />
+        <StatCard icon={CheckCircle2} label="Concluídas" value={c("CONCLUIDA")} color={C.green} />
+        <StatCard icon={RefreshCw} label="Recadastro" value={c("RECADASTRO")} color="#F08C2E" />
       </div>
 
       <Card>
@@ -2898,7 +2902,7 @@ function ClienteDetalhe({ nome, requests, users, nav }) {
             <>
               <td className="px-4 py-3 font-mono font-semibold" style={{ color: C.coral }}>{r.id}</td>
               <td className="px-4 py-3" style={{ color: C.muted }}>{r.uf}</td>
-              <td className="px-4 py-3"><Pill {...STATUS[r.status]} /></td>
+              <td className="px-4 py-3"><Pill {...(STATUS_HIST[r.status] || STATUS.NOVA)} /></td>
               <td className="px-4 py-3">{slaSelo(r) ? <Pill {...slaSelo(r)} /> : <span style={{ color: C.muted }}>—</span>}</td>
               <td className="px-4 py-3" style={{ color: C.muted }}>{r.abertura}</td>
               <td className="px-4 py-3"><ChevronRight size={16} style={{ color: C.muted }} /></td>
@@ -3057,7 +3061,7 @@ function Usuarios({ toast, users, currentUser, onAddUser, onUpdateUser, onDelete
 function relatorioHTML(tipo, requests) {
   const fmt = new Date().toLocaleString("pt-BR");
   const coral = C.coral;
-  const statusList = [["NOVA", "Nova"], ["EM_ANALISE", "Em Análise"], ["AGUARDANDO", "Aguardando Inf."], ["APROVADA", "Aprovada"], ["NEGADA", "Negada"], ["CONCLUIDA", "Concluída"]];
+  const statusList = Object.entries(STATUS).map(([k, v]) => [k, v.label]);
   const cStatus = (s) => requests.filter(r => r.status === s).length;
   const cSla = (s) => requests.filter(r => slaDe(r) === s).length;
   const total = requests.length || 1;
@@ -3230,7 +3234,7 @@ function Relatorios({ toast, requests }) {
 }
 
 function Config({ toast, templates, onSaveTemplates, config, onSaveConfig, podeEditarRegras }) {
-  const labels = { EM_ANALISE: "Em análise", AGUARDANDO: "Aguardando informações", APROVADA: "Aprovada", NEGADA: "Negada", CONCLUIDA: "Concluída" };
+  const labels = { EM_ANALISE: "Em análise", AGUARDANDO: "Aguardando devolutiva", CONCLUIDA: "Concluída", RECADASTRO: "Recadastro" };
   const [tpl, setTpl] = useState({ ...DEFAULT_TEMPLATES, ...(templates || {}) });
   const setOne = (k) => (e) => setTpl(s => ({ ...s, [k]: e.target.value }));
   const [slaDias, setSlaDias] = useState(String(config?.slaDias || 7));
@@ -3304,9 +3308,8 @@ function Config({ toast, templates, onSaveTemplates, config, onSaveConfig, podeE
 function Modal({ kind, onConfirm, onClose }) {
   const [obs, setObs] = React.useState("");
   const map = {
-    aprovar:     { title: "Aprovar solicitação",               color: C.green,    fields: ["Observações internas"], cta: "Confirmar aprovação",         status: "APROVADA"    },
-    negar:       { title: "Negar solicitação",                 color: C.danger,    fields: ["Motivo da negativa"],                                                          cta: "Confirmar negativa",           status: "NEGADA"      },
-    ajuste:      { title: "Solicitar ajuste",                  color: C.yellow,   fields: ["O que precisa ser corrigido / enviado"],                                       cta: "Enviar solicitação de ajuste", status: "AGUARDANDO"  },
+    ajuste:      { title: "Aguardar devolutiva do solicitante", color: C.yellow,   fields: ["O que o solicitante precisa enviar ou responder"],                             cta: "Confirmar",                    status: "AGUARDANDO"  },
+    recadastro:  { title: "Abrir recadastro",                  color: "#F08C2E",  fields: ["Motivo do recadastro (opcional)"],                                              cta: "Abrir recadastro",             status: "RECADASTRO"  },
     concluir:    { title: "Concluir solicitação",              color: C.violet,   fields: ["Observações finais"],                                                           cta: "Concluir",                     status: "CONCLUIDA"   },
     juridico:    { title: "Submeter ao Setor Jurídico",        color: "#7B5EA7",  fields: ["Motivo / observação (opcional)"],                                              cta: "Confirmar submissão",          status: "JURIDICO"    },
     fiscal:      { title: "Submeter ao Setor Fiscal",          color: "#0077B6",  fields: ["Motivo / observação (opcional)"],                                              cta: "Confirmar submissão",          status: "FISCAL"      },
@@ -3318,6 +3321,11 @@ function Modal({ kind, onConfirm, onClose }) {
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(30,30,42,.55)" }} onClick={onClose}>
       <div className="w-full max-w-md rounded-2xl bg-white p-6" style={{ border: `1px solid ${C.line}` }} onClick={e => e.stopPropagation()}>
         <h2 className="text-lg font-bold mb-1" style={{ color: m.color }}>{m.title}</h2>
+        {kind === "recadastro" && (
+          <p className="text-sm mb-4" style={{ color: C.muted }}>
+            Começa um novo ciclo de análise: o prazo (SLA) volta a contar a partir de hoje, com o SLA padrão das Configurações.
+          </p>
+        )}
         {["juridico","fiscal","financeiro"].includes(kind) && (
           <p className="text-sm mb-4" style={{ color: C.muted }}>
             O cliente será notificado que a documentação foi encaminhada para análise do setor selecionado.
@@ -4055,9 +4063,8 @@ export default function App() {
     // Texto do movimento na timeline
     const moveText = isSetorial
       ? `Documentação submetida ao ${SETOR_LABEL[status]} para análise.${obs ? ` Observação: ${obs}` : ""}`
-      : status === "APROVADA"   ? "Cadastro aprovado pela equipe gocase."
-      : status === "NEGADA"     ? `Solicitação negada.${obs ? ` Motivo: ${obs}` : ""}`
-      : status === "AGUARDANDO" ? `Aguardando informações ou documentos do solicitante.${obs ? ` Detalhe: ${obs}` : ""}`
+      : status === "AGUARDANDO" ? `Aguardando devolutiva do solicitante.${obs ? ` Detalhe: ${obs}` : ""}`
+      : status === "RECADASTRO" ? `Recadastro aberto — novo ciclo de análise com prazo até ${fmtDataBR(new Date(now + (config.slaDias || 7) * 86400000))}.${obs ? ` Motivo: ${obs}` : ""}`
       : status === "CONCLUIDA"  ? "Processo concluído e solicitante comunicado."
       : `Status atualizado para ${STATUS[status]?.label || status}.`;
 
@@ -4073,6 +4080,8 @@ export default function App() {
         resp: req.resp === "—" ? (currentUser?.name || "Equipe gocase") : req.resp,
         ...(req.resp === "—" && !req.atribTs ? { atribTs: now } : {}),
         movimentos: [...(req.movimentos || []), mover],
+        // Recadastro = novo ciclo: o SLA recomeça hoje com o prazo padrão atual.
+        ...(status === "RECADASTRO" ? { cicloTs: now, slaDias: config.slaDias || 7, prazo: fmtDataBR(new Date(now + (config.slaDias || 7) * 86400000)), prazoTs: undefined } : {}),
       };
       setRequests(rs => rs.map(r => r.id === reqId ? updated : r));
       db.saveRequest(updated);
@@ -4145,7 +4154,7 @@ export default function App() {
 
   // Arrastar um card para outra coluna do quadro: status que pedem informação abrem o
   // modal da ação correspondente; os demais mudam direto.
-  const MODAL_DO_STATUS = { APROVADA: "aprovar", NEGADA: "negar", AGUARDANDO: "ajuste", CONCLUIDA: "concluir", JURIDICO: "juridico", FISCAL: "fiscal", FINANCEIRO: "financeiro" };
+  const MODAL_DO_STATUS = { AGUARDANDO: "ajuste", CONCLUIDA: "concluir", JURIDICO: "juridico", FISCAL: "fiscal", FINANCEIRO: "financeiro", RECADASTRO: "recadastro" };
   const moverStatus = (reqId, status) => {
     const req = requests.find(r => r.id === reqId);
     if (!req || req.status === status) return;
@@ -4225,7 +4234,7 @@ export default function App() {
   const editChatMsg = (reqId, msgId, texto) => alterarChatMsg(reqId, msgId, (m, now) => ({ ...m, texto, editadaTs: now }));
   const deleteChatMsg = (reqId, msgId) => alterarChatMsg(reqId, msgId, (m, now) => ({ ...m, texto: "", arquivos: [], excluida: true, excluidaTs: now }));
 
-  if (view === "detalhe") screen = <Detalhe r={selected} back={() => nav("lista-cad")} interno openModal={setModal} currentUser={currentUser} onSendMsg={sendChatMsg} onReopenRequest={reopenRequest} onEditMsg={editChatMsg} onDeleteMsg={deleteChatMsg} acervo={acervo} onLiberarDoc={liberarDoc} onCancelarEnvio={cancelarEnvio} toast={toast} onAbrirGoService={() => setGoserviceId(selected.id)} />;
+  if (view === "detalhe") screen = <Detalhe r={selected} back={() => nav("lista-cad")} interno openModal={setModal} currentUser={currentUser} onSendMsg={sendChatMsg} onReopenRequest={reopenRequest} onEditMsg={editChatMsg} onDeleteMsg={deleteChatMsg} acervo={acervo} onLiberarDoc={liberarDoc} onCancelarEnvio={cancelarEnvio} toast={toast} onAbrirGoService={() => setGoserviceId(selected.id)} onMudarStatus={moverStatus} />;
   else if (view === "cliente") screen = <ClienteDetalhe nome={selId} requests={requests} users={users} nav={nav} />;
   else {
     screen = { dash: <IntDash nav={nav} requests={requests} />, "lista-cad": <IntLista nav={nav} requests={requests} tipo="Cadastro" titulo="Solicitações de Cadastro" onMoverStatus={moverStatus} />, clientes: <Clientes requests={requests} users={users} nav={nav} />, acervo: (["ADMIN", "GESTOR"].includes(currentUser?.role) ? <AcervoDocs acervo={acervo} onAdd={addAcervoDoc} onUpdate={updateAcervoDoc} onRemove={removeAcervoDoc} toast={toast} /> : <IntDash nav={nav} requests={requests} />), usuarios: <Usuarios toast={toast} users={users} currentUser={currentUser} onAddUser={addUser} onUpdateUser={updateUser} onDeleteUser={removeUser} />, relatorios: <Relatorios toast={toast} requests={requests} />, config: <Config toast={toast} templates={templates} onSaveTemplates={saveTemplates} config={config} onSaveConfig={saveConfig} podeEditarRegras={["ADMIN", "GESTOR"].includes(currentUser?.role)} />, conta: <MinhaConta toast={toast} user={currentUser} /> }[view];
