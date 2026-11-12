@@ -130,6 +130,7 @@ function ensureSchema(env) {
       await secureAccounts(env);
       await normalizarAcervo(env);
       await encurtarProtocolos(env);
+      await migrarStatusAntigos(env);
     })().catch((e) => {
       schemaReady = null;
       throw e;
@@ -471,6 +472,30 @@ function fileRefResponse(id, body) {
  * antigo, com 6 dígitos (CAD-2026-000008), vira o curto (CAD-2026-008): no banco, uma vez
  * (encurtarProtocolos), e em toda entrada — consulta pública e gravação da equipe. */
 const protocoloCurto = (id) => String(id || "").replace(/^(CAD-\d{4}-)0*(\d{3,})$/i, "$1$2");
+/* Os status "Aprovada" e "Negada" saíram do processo: o chamado que ainda estiver neles vira
+ * Concluída, uma vez, com um movimento explicando a troca (o histórico de aprovação/negativa
+ * continua nos movimentos antigos e o SLA segue contado pela data da decisão). */
+const STATUS_ANTIGOS = { APROVADA: "Aprovada", NEGADA: "Negada" };
+async function migrarStatusAntigos(env) {
+  const r = await env.DB.query("SELECT id, payload FROM requests WHERE status IN ('APROVADA', 'NEGADA')", []);
+  for (const row of r.rows || []) {
+    const req = parse(row.payload);
+    if (!req || !STATUS_ANTIGOS[req.status]) continue;
+    const now = Date.now();
+    const decisao = [...(req.movimentos || [])].reverse().find((m) => m && m.status === req.status);
+    const novo = {
+      ...req,
+      status: "CONCLUIDA",
+      finalizadoTs: req.finalizadoTs || (decisao && decisao.ts) || req.ultimaAtualizTs || now,
+      movimentos: [...(req.movimentos || []), {
+        status: "CONCLUIDA", actor: "sistema", who: "Plataforma", ts: now,
+        text: `Status "${STATUS_ANTIGOS[req.status]}" deixou de existir — chamado movido para Concluída.`,
+      }],
+    };
+    await env.DB.exec("UPDATE requests SET status = ?, payload = ? WHERE id = ?", ["CONCLUIDA", JSON.stringify(novo), row.id]);
+  }
+}
+
 async function encurtarProtocolos(env) {
   const r = await env.DB.query("SELECT id, payload FROM requests WHERE id GLOB 'CAD-[0-9][0-9][0-9][0-9]-0[0-9][0-9][0-9][0-9]*'", []);
   for (const row of r.rows || []) {
@@ -1060,7 +1085,8 @@ export default {
         const id = protocoloCurto(decodeURIComponent(path.slice("/api/requests/".length)));
         const corpo = (await request.json().catch(() => null)) || null;
         if (!corpo || !corpo.id || protocoloCurto(corpo.id) !== id) return json({ error: "invalid_body" }, 400);
-        const recebido = { ...corpo, id };
+        // Tela aberta antes da troca de status ainda pode mandar Aprovada/Negada: vira Concluída.
+        const recebido = { ...corpo, id, ...(STATUS_ANTIGOS[corpo.status] ? { status: "CONCLUIDA" } : {}) };
         // A tela da equipe grava o chamado inteiro: junta com o que está no banco para não
         // apagar mensagens que o fornecedor mandou enquanto a tela estava aberta.
         const req = mesclarChamado(await getRequest(env, id), recebido);
