@@ -309,6 +309,10 @@ function setToken(t) {
   _token = t || "";
   try { if (_token) sessionStorage.setItem(TOKEN_KEY, _token); else sessionStorage.removeItem(TOKEN_KEY); } catch (e) { }
 }
+// Chamado quando uma rota da equipe responde 401 (sessão de 12 h expirada com a tela aberta):
+// o App() mostra o login por cima da tela e, depois de entrar, regrava o que ficou pendente.
+let _aoSessaoExpirada = null;
+const ROTAS_SEM_SESSAO = /^\/api\/(public\/|login$|logout$|me$|health$)/;
 async function apiJSON(method, path, body) {
   const r = await fetch(path, {
     method,
@@ -316,8 +320,12 @@ async function apiJSON(method, path, body) {
     headers: { "content-type": "application/json", Accept: "application/json", ...(_token ? { Authorization: `Bearer ${_token}` } : {}) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
+  if (r.status === 401 && !ROTAS_SEM_SESSAO.test(path) && _aoSessaoExpirada) _aoSessaoExpirada();
   return r;
 }
+// Chamados e notificações que o servidor ainda não gravou (sessão expirada, rede fora):
+// ficam aqui até gravar — por cima do que vier do servidor e regravados depois do novo login.
+const _pendentes = { requests: new Map(), notifs: new Map() };
 const stripPw = (u) => { if (!u) return u; const { password, ...rest } = u; return rest; };
 const readAsDataURL = (file) => new Promise((res, rej) => {
   const r = new FileReader();
@@ -461,19 +469,38 @@ const db = {
     }
     _ls.set(DB_KEY, _lsUsers().filter(x => x.email !== email));
   },
+  // Devolve true se gravou; senão o chamado fica em _pendentes até gravar.
   async saveRequest(req) {
     if ((await dbMode()) === "remote") {
-      try { await apiJSON("PUT", `/api/requests/${encodeURIComponent(req.id)}`, req); } catch (e) { }
-      return;
+      let ok = false;
+      try { ok = (await apiJSON("PUT", `/api/requests/${encodeURIComponent(req.id)}`, req)).ok; } catch (e) { }
+      if (ok) _pendentes.requests.delete(req.id); else _pendentes.requests.set(req.id, req);
+      return ok;
     }
     _ls.upsert(REQ_KEY, req, "id");
+    return true;
   },
   async saveNotification(n) {
     if ((await dbMode()) === "remote") {
-      try { await apiJSON("POST", "/api/notifications", n); } catch (e) { }
-      return;
+      let ok = false;
+      try { ok = (await apiJSON("POST", "/api/notifications", n)).ok; } catch (e) { }
+      if (ok) _pendentes.notifs.delete(n.id); else _pendentes.notifs.set(n.id, n);
+      return ok;
     }
     _ls.upsert(NOTIF_KEY, n, "id");
+  },
+  // Regrava o que ficou pendente (o servidor mescla chat e movimentos com o que já tem).
+  async gravarPendentes() {
+    let gravados = 0;
+    for (const req of [..._pendentes.requests.values()]) if (await this.saveRequest(req)) gravados++;
+    for (const n of [..._pendentes.notifs.values()]) await this.saveNotification(n);
+    return { gravados, faltam: _pendentes.requests.size };
+  },
+  // Lista do servidor com as versões locais ainda não gravadas por cima.
+  comPendentes(lista) {
+    if (!_pendentes.requests.size) return lista;
+    const ids = new Set(lista.map(r => r.id));
+    return [...lista.map(r => _pendentes.requests.get(r.id) || r), ...[..._pendentes.requests.values()].filter(r => !ids.has(r.id))];
   },
   async markNotifsRead(ids) {
     if (!ids || !ids.length) return;
@@ -524,7 +551,9 @@ const db = {
         const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
         const r = await apiJSON("POST", "/api/files", { name: file.name, type: file.type || "", size: file.size, data: b64 });
         if (r.ok) { const j = await r.json(); return { id: j.id, name: file.name, type: file.type || "", size: file.size, url: j.url }; }
-      } catch (e) { }
+        if (r.status === 401) throw new Error("Sua sessão expirou — entre de novo e anexe o arquivo outra vez.");
+      } catch (e) { if (/sessão expirou/.test(e.message || "")) throw e; }
+      throw new Error(`Não foi possível enviar "${file.name}". Tente novamente.`);
     }
     return { name: file.name, type: file.type || "", size: file.size, url: dataUrl };
   },
@@ -941,6 +970,46 @@ const AuthShell = ({ children }) => (
 );
 
 /* ===================== Login (equipe interna) ===================== */
+/* Sessão da equipe expirou com a tela aberta: pede a senha por cima da tela (sem perder o que
+   está nela). Depois de entrar, o App() regrava os chamados que ficaram pendentes. */
+function SessaoExpirada({ email, onRenovado, onSair }) {
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+  const entrar = async () => {
+    if (loading || !password) return;
+    setLoading(true);
+    const res = await db.login(email, password);
+    setLoading(false);
+    if (!res.ok) {
+      setErr(res.reason === "throttled" ? "Muitas tentativas. Aguarde 15 minutos e tente de novo."
+        : res.reason === "error" ? "Não foi possível conectar. Tente novamente." : "Senha inválida.");
+      return;
+    }
+    onRenovado(res.user);
+  };
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" style={{ background: "rgba(30,30,42,.6)" }} role="dialog" aria-modal="true" aria-labelledby="sessao-titulo">
+      <div className="w-full max-w-sm rounded-2xl bg-white p-6" style={{ border: `1px solid ${C.line}` }}>
+        <h2 id="sessao-titulo" className="text-lg font-bold mb-1" style={{ color: C.text }}>Sua sessão expirou</h2>
+        <p className="text-sm mb-4" style={{ color: C.muted }}>Entre de novo para continuar. O que você fez desde então ainda não foi salvo — será salvo assim que você entrar.</p>
+        <div className="text-xs mb-1" style={{ color: C.muted }}>E-mail</div>
+        <div className="text-sm font-semibold mb-3" style={{ color: C.text }}>{email}</div>
+        <label htmlFor="sessao-senha" className="text-xs font-semibold" style={{ color: C.muted }}>Senha</label>
+        <input id="sessao-senha" type="password" autoFocus value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && entrar()}
+          className="mt-1 w-full rounded-xl border px-3 py-2.5 text-sm outline-none bg-white" style={{ borderColor: C.line }} />
+        {err && <div className="text-xs font-semibold mt-2" style={{ color: C.danger }}>{err}</div>}
+        <div className="flex gap-2 mt-5">
+          <button onClick={entrar} disabled={loading} className="flex-1 rounded-xl py-2.5 text-sm font-bold text-white inline-flex items-center justify-center gap-2" style={{ background: C.coral, opacity: loading ? .7 : 1 }}>
+            {loading && <Loader2 size={15} className="animate-spin" />}Entrar e salvar
+          </button>
+          <button onClick={onSair} className="rounded-xl px-4 py-2.5 text-sm font-bold border" style={{ borderColor: C.line, color: C.muted }}>Sair</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Login({ onLogin, goBack }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -1693,10 +1762,18 @@ function ResellerCard({ cnpj }) {
 /* Documento pedido pelo fornecedor, no chamado. A equipe envia com um clique (usa o
    arquivo/link atual do acervo) ou anexa um arquivo na hora; o fornecedor baixa em
    "Acompanhar solicitação" (protocolo + CNPJ). O envio pode ser cancelado. */
+// Documento do acervo de um pedido: pelo id e, se o documento foi recriado no Acervo (id novo),
+// pela dupla documento + empresa ("Contrato Social — Go Comércio"). Igual a docDoAcervo() no worker.
+function docDoAcervo(acervo, d) {
+  const lista = acervo || [];
+  return lista.find(x => x.id === d.docId)
+    || lista.find(x => baseDe(x) === baseDe(d) && (empresaDe(x) || "") === (empresaDe(d) || "")) || null;
+}
 function DocEnvioItem({ d, acervo, interno, onLiberar, onCancelar }) {
   const fileRef = useRef(null);
   const [enviando, setEnviando] = useState(false);
-  const doc = (acervo || []).find(x => x.id === d.docId);
+  const [erroEnvio, setErroEnvio] = useState("");
+  const doc = docDoAcervo(acervo, d);
   const partes = doc ? acervoPartes(doc) : { arquivo: null, link: "" };
   const conteudo = d.arquivoEnviado || partes.arquivo || (linkValido(partes.link) ? partes.link : null);
   const abrir = () => {
@@ -1708,8 +1785,9 @@ function DocEnvioItem({ d, acervo, interno, onLiberar, onCancelar }) {
   const anexar = async (e) => {
     const file = e.target.files?.[0]; if (e.target) e.target.value = "";
     if (!file) return;
-    setEnviando(true);
+    setEnviando(true); setErroEnvio("");
     try { const up = await db.uploadFile(file); await onLiberar(d.docId, { url: up.url, name: file.name, type: up.type || file.type || "" }); }
+    catch (er) { setErroEnvio(er?.message || "Não foi possível enviar o arquivo."); }
     finally { setEnviando(false); }
   };
   const quando = d.liberadoTs ? new Date(d.liberadoTs).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
@@ -1739,6 +1817,7 @@ function DocEnvioItem({ d, acervo, interno, onLiberar, onCancelar }) {
               </button>
             </>
           )}
+          {erroEnvio && <span className="basis-full font-semibold" style={{ color: C.danger }}>{erroEnvio}</span>}
         </div>
       )}
     </div>
@@ -3975,7 +4054,7 @@ export default function App() {
     const data = await db.bootstrap();
     if (!data) return false;
     setUsers(Array.isArray(data.users) ? data.users : []);
-    if (Array.isArray(data.requests)) setRequests(data.requests.filter(r => r.tipo === "Cadastro"));
+    if (Array.isArray(data.requests)) setRequests(db.comPendentes(data.requests).filter(r => r.tipo === "Cadastro"));
     if (Array.isArray(data.notifications)) setNotifications(data.notifications);
     if (data.templates && typeof data.templates === "object") setTemplates({ ...DEFAULT_TEMPLATES, ...data.templates });
     else db.saveTemplates(DEFAULT_TEMPLATES);
@@ -3993,11 +4072,26 @@ export default function App() {
       if (document.hidden) return;
       const data = await db.bootstrap();
       if (!data) return;
-      if (Array.isArray(data.requests)) setRequests(data.requests.filter(r => r.tipo === "Cadastro"));
+      if (Array.isArray(data.requests)) setRequests(db.comPendentes(data.requests).filter(r => r.tipo === "Cadastro"));
       if (Array.isArray(data.notifications)) setNotifications(data.notifications);
     }, 45000);
     return () => clearInterval(t);
   }, [currentUser]);
+
+  // Sessão da equipe expirou com a tela aberta: login por cima da tela; depois regrava o pendente.
+  const [sessaoExpirada, setSessaoExpirada] = useState(false);
+  useEffect(() => {
+    _aoSessaoExpirada = () => { if (currentUser) setSessaoExpirada(true); };
+    return () => { _aoSessaoExpirada = null; };
+  }, [currentUser]);
+  const renovarSessao = async (u) => {
+    setCurrentUser(u);
+    setSessaoExpirada(false);
+    const { gravados, faltam } = await db.gravarPendentes();
+    await loadInternalData();
+    toast(faltam ? `Sessão renovada, mas ${faltam} chamado(s) ainda não foram salvos — tente de novo.`
+      : gravados ? `Sessão renovada — ${gravados} chamado(s) salvos.` : "Sessão renovada.");
+  };
 
   // Ao abrir: descobre se já há sessão válida da equipe; senão mostra o formulário público.
   useEffect(() => {
@@ -4257,6 +4351,7 @@ export default function App() {
         {screen}
       </Shell>
       {modal && <Modal kind={modal} onConfirm={confirmModal} onClose={() => setModal(null)} />}
+      {sessaoExpirada && currentUser && <SessaoExpirada email={currentUser.email} onRenovado={renovarSessao} onSair={() => { setSessaoExpirada(false); logout(); }} />}
       {goserviceId && requests.some(x => x.id === goserviceId) && <ChamadoJuridicoGoService r={requests.find(x => x.id === goserviceId)} acervo={acervo} currentUser={currentUser} toast={toast} onPreparado={registrarGoService} onClose={() => setGoserviceId(null)} />}
       <DocViewer />
       <Toast />
