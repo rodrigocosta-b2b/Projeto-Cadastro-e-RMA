@@ -584,11 +584,17 @@ const linkHttp = (u) => (/^https?:\/\//i.test(String(u || "")) ? String(u) : "")
  *    ou, se não houver, o arquivo/link atual do acervo.
  * O arquivo é servido por /api/public/entrega/:token/:docId; o link do Drive vai direto.
  * `_fileUrl` é interno (nunca vai na resposta). */
+// Documento do acervo de um pedido: pelo id e, se o documento foi recriado no Acervo (id novo),
+// pela dupla documento + empresa. Igual a docDoAcervo() no cliente.
+function docDoAcervo(acervo, e) {
+  return acervo.find((d) => String(d.id) === String(e.docId))
+    || acervo.find((d) => baseDe(d) === baseDe(e) && (empresaDe(d) || "") === (empresaDe(e) || "")) || null;
+}
 async function itensEntrega(env, req) {
   if (!req.entregaToken) return [];
-  const atual = new Map((await listAcervo(env)).map((doc) => [String(doc.id), doc]));
+  const acervo = await listAcervo(env);
   return (req.docsEnviados || []).map((e) => {
-    const doc = atual.get(String(e.docId));
+    const doc = docDoAcervo(acervo, e);
     let arquivo = null, link = "";
     if (e.liberado) {
       if (e.arquivoEnviado && fileIdFromUrl(e.arquivoEnviado.url)) arquivo = e.arquivoEnviado;
