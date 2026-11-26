@@ -12,6 +12,9 @@
  *     de equipe (ADMIN/GESTOR/COLABORADOR): login + senha → cookie HttpOnly
  *     `gcf_session` (também aceito como `Authorization: Bearer`).
  *
+ * Avisos ao solicitante no Slack (mensagem direta) quando a equipe grava o chamado — ver
+ * avisarSolicitante(); token no segredo SLACK_BOT_TOKEN do GoDeploy.
+ *
  * Senhas: hash PBKDF2-SHA256. A senha padrão antiga (que está no repositório público)
  * é recusada no login e, se alguma conta ainda a usa, é trocada pela senha do segredo
  * SEED_ADMIN_PASSWORD (setAppSecret). Sem esse segredo, essas contas ficam sem login.
@@ -397,12 +400,18 @@ async function getTemplates(env) {
 
 /* Configurações gerais (Configurações → Regras de negócio), em kv 'config'.
  * slaDias: prazo de análise das NOVAS solicitações (as abertas mantêm o prazo que receberam). */
-const CONFIG_PADRAO = { slaDias: 7 };
+const AVISOS_PADRAO = { status: true, documentos: true, chat: false };
+const CONFIG_PADRAO = { slaDias: 7, avisosSlack: AVISOS_PADRAO };
 const slaDiasValido = (v) => Number.isInteger(Number(v)) && Number(v) >= 1 && Number(v) <= 90;
+const avisosValidos = (a) => Object.fromEntries(Object.keys(AVISOS_PADRAO).map((k) => [k, a && typeof a[k] === "boolean" ? a[k] : AVISOS_PADRAO[k]]));
 async function getConfig(env) {
   const r = await env.DB.query("SELECT v FROM kv WHERE k = 'config'", []);
   const salvo = (r.rows && r.rows[0] && parse(r.rows[0].v)) || {};
-  return { ...CONFIG_PADRAO, ...(slaDiasValido(salvo.slaDias) ? { slaDias: Number(salvo.slaDias) } : {}) };
+  return {
+    ...CONFIG_PADRAO,
+    ...(slaDiasValido(salvo.slaDias) ? { slaDias: Number(salvo.slaDias) } : {}),
+    avisosSlack: avisosValidos(salvo.avisosSlack),
+  };
 }
 
 async function saveNotification(env, n) {
@@ -787,8 +796,106 @@ function mesclarChamado(atual, recebido) {
     movimentos: unir(atual.movimentos, recebido.movimentos, (m) => `${m.ts}|${m.status}|${m.text}`),
     acessoToken: recebido.acessoToken || atual.acessoToken || "",
     entregaToken: recebido.entregaToken || atual.entregaToken || "",
+    avisos: atual.avisos || [], // histórico de avisos ao solicitante: só o servidor escreve
   };
 }
+/* ------------------------ avisos ao solicitante no Slack ------------------------ *
+ * Quando a equipe grava o chamado (PUT /api/requests/:id), compara com a versão do banco e
+ * manda mensagem direta no Slack ao solicitante (achado pelo e-mail dele) sobre:
+ *   status   — mudança de status (Aguardando devolutiva leva o detalhe do que enviar);
+ *   documentos — documento liberado pela equipe para download;
+ *   chat     — mensagem nova da equipe no chat (desligado por padrão).
+ * Liga/desliga em Configurações (config.avisosSlack). Token: segredo SLACK_BOT_TOKEN do
+ * GoDeploy (nunca no código); sem ele nada é enviado. Escopos do app do Slack:
+ *   users:read + users:read.email → slackUsuarioPorEmail() (users.lookupByEmail)
+ *   chat:write                    → slackEnviarDireta()    (chat.postMessage)
+ * Cada aviso fica em req.avisos (com chave, para não repetir se a tela gravar de novo). */
+const ROTULO_STATUS = {
+  NOVA: "Nova", EM_ANALISE: "Em análise", AGUARDANDO: "Aguardando devolutiva",
+  JURIDICO: "Submetido ao Jurídico", FISCAL: "Submetido ao Fiscal", FINANCEIRO: "Submetido ao Financeiro",
+  CONCLUIDA: "Concluída", RECADASTRO: "Recadastro",
+};
+const SLACK_API = (env) => env.SLACK_API_BASE || "https://slack.com/api"; // SLACK_API_BASE só para testes locais
+async function slackChamar(env, metodo, opcoes) {
+  const controle = new AbortController();
+  const tempo = setTimeout(() => controle.abort(), 6000);
+  try {
+    const r = await fetch(`${SLACK_API(env)}/${metodo}`, {
+      ...opcoes, signal: controle.signal,
+      headers: { Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`, ...(opcoes.headers || {}) },
+    });
+    const j = await r.json().catch(() => ({}));
+    return j && j.ok ? j : { ok: false, error: (j && j.error) || `http_${r.status}` };
+  } catch (e) {
+    return { ok: false, error: e && e.name === "AbortError" ? "timeout" : "rede" };
+  } finally { clearTimeout(tempo); }
+}
+// Escopos users:read + users:read.email.
+async function slackUsuarioPorEmail(env, email) {
+  const j = await slackChamar(env, `users.lookupByEmail?email=${encodeURIComponent(email)}`, { method: "GET" });
+  return j.ok && j.user ? { id: j.user.id } : { erro: j.error === "users_not_found" ? "não encontrado no Slack" : `Slack: ${j.error}` };
+}
+// Escopo chat:write. Mandar para o id do usuário entrega na conversa direta com o app.
+async function slackEnviarDireta(env, usuarioId, texto) {
+  const j = await slackChamar(env, "chat.postMessage", {
+    method: "POST",
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ channel: usuarioId, text: texto, unfurl_links: false }),
+  });
+  return j.ok ? {} : { erro: `Slack: ${j.error}` };
+}
+const slackEscapar = (t) => String(t || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// O que mudou entre a versão do banco e a gravada agora, já filtrado pelas preferências.
+function avisosPendentes(anterior, req, prefs) {
+  if (!anterior) return [];
+  const lista = [];
+  if (prefs.status && anterior.status !== req.status && ROTULO_STATUS[req.status]) {
+    const mov = [...(req.movimentos || [])].reverse().find((m) => m && m.status === req.status);
+    const detalhe = req.status === "AGUARDANDO" && mov && mov.text ? mov.text : "";
+    lista.push({ chave: `status:${req.status}:${(mov && mov.ts) || req.ultimaAtualizTs || ""}`, tipo: "status",
+      linha: `mudou para *${ROTULO_STATUS[req.status]}*.${detalhe ? `\n> ${slackEscapar(detalhe)}` : ""}` });
+  }
+  if (prefs.documentos) {
+    const antes = new Set((anterior.docsEnviados || []).filter((e) => e.liberado).map((e) => String(e.docId)));
+    for (const e of req.docsEnviados || []) {
+      if (e.liberado && !antes.has(String(e.docId)))
+        lista.push({ chave: `doc:${e.docId}:${e.liberadoTs || ""}`, tipo: "documento",
+          linha: `tem um documento liberado para você: *${slackEscapar(e.nome || "documento")}*. Baixe em "Acompanhar solicitação".` });
+    }
+  }
+  if (prefs.chat) {
+    const antes = new Set((anterior.chat || []).map((m) => m && m.id));
+    for (const m of req.chat || []) {
+      if (m && m.id && m.role !== "cliente" && !m.excluida && !antes.has(m.id))
+        lista.push({ chave: `chat:${m.id}`, tipo: "chat",
+          linha: `tem uma mensagem nova da equipe gocase: "${slackEscapar(String(m.texto || "(anexo)").slice(0, 280))}"` });
+    }
+  }
+  const enviados = new Set((req.avisos || []).map((a) => a.chave));
+  return lista.filter((a) => !enviados.has(a.chave));
+}
+async function avisarSolicitante(env, anterior, req, origem) {
+  if (!env.SLACK_BOT_TOKEN) return [];
+  const { avisosSlack } = await getConfig(env);
+  const pendentes = avisosPendentes(anterior, req, avisosSlack);
+  if (!pendentes.length) return [];
+  const email = lower(req.emailSolicitante || req.ownerEmail || "");
+  const ts = Date.now();
+  const registrar = (a, erro) => ({ chave: a.chave, tipo: a.tipo, canal: "slack", para: email, ts, ...(erro ? { erro } : { ok: true }) });
+  if (!emailValido(email)) return pendentes.map((a) => registrar(a, "solicitante sem e-mail válido"));
+  const usuario = await slackUsuarioPorEmail(env, email);
+  if (usuario.erro) return pendentes.map((a) => registrar(a, usuario.erro));
+  const cabecalho = `*Cadastro de Fornecedores gocase* — pedido *${req.id}* (${slackEscapar(req.parceiro || "")})`;
+  const rodape = `<${origem}/|Acompanhar solicitação> (use o protocolo ${req.id} ou o seu e-mail)`;
+  const resultado = [];
+  for (const a of pendentes) {
+    const envio = await slackEnviarDireta(env, usuario.id, `${cabecalho}\nSeu pedido ${a.linha}\n${rodape}`);
+    resultado.push(registrar(a, envio.erro));
+  }
+  return resultado;
+}
+
 async function garantirAcesso(env, req) {
   if (req.acessoToken) return req.acessoToken;
   req.acessoToken = randomToken(24);
@@ -1034,14 +1141,14 @@ export default {
           listAcervo(env),
           getConfig(env),
         ]);
-        return json({ users, requests, notifications, templates, acervo, config });
+        return json({ users, requests, notifications, templates, acervo, config: { ...config, slackConfigurado: !!env.SLACK_BOT_TOKEN } });
       }
 
       if (path === "/api/config" && method === "PUT") {
         if (!isManager) return json({ error: "forbidden" }, 403);
         const body = (await request.json().catch(() => null)) || null;
         if (!body || !slaDiasValido(body.slaDias)) return json({ error: "invalid_sla" }, 400);
-        const config = { ...(await getConfig(env)), slaDias: Number(body.slaDias) };
+        const config = { ...(await getConfig(env)), slaDias: Number(body.slaDias), avisosSlack: avisosValidos(body.avisosSlack) };
         await env.DB.exec(
           "INSERT INTO kv (k, v) VALUES ('config', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
           [JSON.stringify(config)],
@@ -1095,7 +1202,10 @@ export default {
         const recebido = { ...corpo, id, ...(STATUS_ANTIGOS[corpo.status] ? { status: "CONCLUIDA" } : {}) };
         // A tela da equipe grava o chamado inteiro: junta com o que está no banco para não
         // apagar mensagens que o fornecedor mandou enquanto a tela estava aberta.
-        const req = mesclarChamado(await getRequest(env, id), recebido);
+        const anterior = await getRequest(env, id);
+        const req = mesclarChamado(anterior, recebido);
+        const avisos = await avisarSolicitante(env, anterior, req, new URL(request.url).origin);
+        if (avisos.length) req.avisos = [...(req.avisos || []), ...avisos].slice(-100);
         await env.DB.exec(
           `INSERT INTO requests (id, owner_email, status, tipo, updated_ts, payload)
            VALUES (?, ?, ?, ?, ?, ?)
