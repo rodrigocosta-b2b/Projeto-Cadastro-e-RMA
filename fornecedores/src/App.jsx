@@ -243,7 +243,13 @@ const TPL_KEY = "gocase_forn_templates_v1";
 const ACERVO_KEY = "gocase_forn_acervo_v1";
 const CONFIG_KEY = "gocase_forn_config_v1";
 // Configurações gerais (Configurações → Regras de negócio). slaDias: prazo das NOVAS solicitações.
-const CONFIG_PADRAO = { slaDias: 7 };
+// avisosSlack: o que vira mensagem direta no Slack para o solicitante (enviada pelo servidor).
+const CONFIG_PADRAO = { slaDias: 7, avisosSlack: { status: true, documentos: true, chat: false } };
+const AVISOS_SLACK = [
+  ["status", "Mudança de status", "Ex.: Submetido ao Jurídico, Concluída. Em Aguardando devolutiva vai junto o que ele precisa enviar."],
+  ["documentos", "Documento liberado", "Quando a equipe envia um documento para ele baixar."],
+  ["chat", "Mensagem da equipe no chat", "Cada resposta da equipe no chat do chamado."],
+];
 // Acervo de documentos que o fornecedor pode pedir no cadastro. Gerenciado por
 // admins/gestores na aba "Acervo de documentos". Cada item tem `documento` (nome sem a
 // empresa), `empresa` ("bb" | "go" | "" = vale para as duas) e o nome exibido
@@ -1973,6 +1979,20 @@ function Detalhe({ r, back, interno, openModal, currentUser, onSendMsg, onReopen
             </div>
           )}
           <ChatPanel r={r} currentUser={currentUser} onSendMsg={onSendMsg} onReopenRequest={onReopenRequest} onEditar={(msg, t) => onEditMsg(r.id, msg.id, t)} onExcluir={(msg) => onDeleteMsg(r.id, msg.id)} />
+          {interno && (r.avisos || []).length > 0 && (
+            <Card className="p-4">
+              <h2 className="font-bold text-sm mb-2" style={{ color: C.text }}>Avisos ao solicitante no Slack</h2>
+              <ul className="space-y-1 text-xs">
+                {[...r.avisos].reverse().slice(0, 8).map((a, i) => (
+                  <li key={i} className="flex gap-2" style={{ color: a.erro ? C.danger : C.muted }}>
+                    <span>{new Date(a.ts).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
+                    <span>{{ status: "Mudança de status", documento: "Documento liberado", chat: "Mensagem no chat" }[a.tipo] || a.tipo}</span>
+                    <span>{a.erro ? `— não enviado: ${a.erro}` : `— enviado para ${a.para}`}</span>
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
         </div>
         <Card className="p-5 self-start">
           <h2 className="font-bold mb-4" style={{ color: C.text }}>Linha do tempo</h2>
@@ -3322,13 +3342,17 @@ function Config({ toast, templates, onSaveTemplates, config, onSaveConfig, podeE
   const slaNum = Number(slaDias);
   const slaOk = Number.isInteger(slaNum) && slaNum >= 1 && slaNum <= 90;
   const alterouSla = slaOk && slaNum !== config?.slaDias;
-  // Grava o SLA padrão (vale para as solicitações abertas a partir de agora).
+  const [avisos, setAvisos] = useState({ ...CONFIG_PADRAO.avisosSlack, ...(config?.avisosSlack || {}) });
+  useEffect(() => { setAvisos({ ...CONFIG_PADRAO.avisosSlack, ...(config?.avisosSlack || {}) }); }, [JSON.stringify(config?.avisosSlack || {})]);
+  const alterouAvisos = JSON.stringify(avisos) !== JSON.stringify({ ...CONFIG_PADRAO.avisosSlack, ...(config?.avisosSlack || {}) });
+  // Grava o SLA padrão (vale para as solicitações abertas a partir de agora) e os avisos do Slack.
   const salvarRegras = async () => {
-    if (!podeEditarRegras || !alterouSla) return true;
+    if (!podeEditarRegras || (!alterouSla && !alterouAvisos)) return true;
     setSalvando(true);
-    const ok = await onSaveConfig({ ...config, slaDias: slaNum });
+    const { slackConfigurado, ...resto } = config || {};
+    const ok = await onSaveConfig({ ...resto, slaDias: slaOk ? slaNum : config?.slaDias, avisosSlack: avisos });
     setSalvando(false);
-    if (!ok) toast("Não foi possível salvar o SLA padrão. Tente novamente.");
+    if (!ok) toast("Não foi possível salvar as configurações. Tente novamente.");
     return ok;
   };
   return (
@@ -3372,10 +3396,17 @@ function Config({ toast, templates, onSaveTemplates, config, onSaveConfig, podeE
       </Card>
 
       <Card className="p-5 mb-4">
-        <h2 className="font-bold mb-3" style={{ color: C.text }}>Notificações</h2>
-        {["Solicitação criada", "Solicitação aprovada", "Solicitação negada", "SLA próximo do vencimento", "SLA vencido"].map(n => (
-          <label key={n} className="flex items-center justify-between py-2 text-sm" style={{ color: C.text }}>
-            {n}<input type="checkbox" defaultChecked className="w-4 h-4" style={{ accentColor: C.coral }} /></label>
+        <h2 className="font-bold mb-1" style={{ color: C.text }}>Avisos no Slack ao solicitante</h2>
+        <p className="text-xs mb-3" style={{ color: config?.slackConfigurado ? C.muted : C.danger }}>
+          {config?.slackConfigurado
+            ? "Mensagem direta no Slack para o e-mail do solicitante, enviada pelo servidor quando a equipe grava o chamado. Cada chamado mostra os avisos enviados."
+            : "O Slack ainda não está conectado (falta o token do app no GoDeploy). As escolhas abaixo valem assim que for conectado."}
+        </p>
+        {AVISOS_SLACK.map(([k, titulo, dica]) => (
+          <label key={k} className="flex items-start justify-between gap-3 py-2 text-sm cursor-pointer" style={{ color: C.text }}>
+            <span>{titulo}<span className="block text-xs" style={{ color: C.muted }}>{dica}</span></span>
+            <input type="checkbox" checked={!!avisos[k]} disabled={!podeEditarRegras} onChange={e => setAvisos(a => ({ ...a, [k]: e.target.checked }))} className="w-4 h-4 mt-1 shrink-0" style={{ accentColor: C.coral }} />
+          </label>
         ))}
       </Card>
       <Btn onClick={async () => { if (!slaOk) { toast("Corrija o SLA padrão: um número inteiro de 1 a 90 dias."); return; } if (await salvarRegras()) toast("Configurações salvas."); }}>Salvar configurações</Btn>
@@ -4108,7 +4139,7 @@ export default function App() {
 
   // Persistência por entidade — cada registro é salvo individualmente no env.DB.
   const saveTemplates = (next) => { setTemplates(next); db.saveTemplates(next); };
-  const saveConfig = async (next) => { const ok = await db.saveConfig(next); if (ok) setConfig(next); return ok; };
+  const saveConfig = async (next) => { const ok = await db.saveConfig(next); if (ok) setConfig(c => ({ ...next, slackConfigurado: c.slackConfigurado })); return ok; };
   const addAcervoDoc = (doc) => { setAcervo(a => [...a, doc]); db.saveAcervoDoc(doc); };
   const updateAcervoDoc = (doc) => { setAcervo(a => a.map(d => d.id === doc.id ? doc : d)); db.saveAcervoDoc(doc); };
   const removeAcervoDoc = (id) => { setAcervo(a => a.filter(d => d.id !== id)); db.removeAcervoDoc(id); };
